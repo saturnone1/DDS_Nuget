@@ -22,4 +22,5 @@ FROM mcr.microsoft.com/dotnet/runtime:9.0 AS runtime
 WORKDIR /app
 COPY --from=build /src/artifacts/ddsclient ./
 ENV DDS_CLIENT_CONFIG_PATH=/app/definitions/dds_client.asap.xml
+ENV PATH="/app:${PATH}"
 ENTRYPOINT ["/app/ddsclient"]

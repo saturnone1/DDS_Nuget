@@ -1,6 +1,6 @@
 # ddsclient CLI와 Kubernetes 확인
 
-`ddsclient` CLI는 NuGet 모듈을 사용하는 앱이 Kubernetes 안에서 DDS/ASAP과 연결되는지 수동 확인하기 위한 도구입니다. 자동 테스트 Job을 만들지 않고, CLI가 들어있는 pod에 직접 접속해서 명령을 실행합니다.
+`ddsclient` CLI는 NuGet 모듈을 사용하는 애플리케이션이 Kubernetes 안에서 DDS/ASAP과 연결되는지 수동으로 확인하기 위한 도구입니다.
 
 ## 이미지 빌드
 
@@ -10,96 +10,67 @@
 docker build -t ddsclient:local .
 ```
 
-원격 Kubernetes 클러스터에 올릴 때:
+원격 Kubernetes 클러스터에서 확인할 때:
 
 ```powershell
 docker build -t registry.example.com/ddsclient:0.1.0 .
 docker push registry.example.com/ddsclient:0.1.0
 ```
 
-원격 registry를 쓴다면 [k8s-ddsclient.yaml](k8s-ddsclient.yaml)의 image 값을 바꿉니다.
-
-```yaml
-image: registry.example.com/ddsclient:0.1.0
-```
+원격 registry를 쓰면 [k8s-ddsclient.yaml](k8s-ddsclient.yaml)의 `image` 값을 바꿉니다.
 
 ## Kubernetes 배포
 
-```bash
+```powershell
 kubectl apply -f docs/k8s-ddsclient.yaml
 kubectl -n dds-test get pods
 ```
 
-pod에 접속합니다.
+Pod는 기본적으로 `ddsclient shell`로 실행됩니다. 이 모드는 하나의 `DdsClient` 인스턴스를 생성하고 계속 유지합니다. 따라서 DDS Discovery Service UI에 보이는 participant와 실제 송수신에 쓰는 participant가 같습니다.
 
-```bash
-kubectl -n dds-test exec -it deploy/ddsclient-cli -- /bin/sh
+## 같은 Participant로 명령 실행
+
+중요: `kubectl exec ... ddsclient publish`를 실행하면 새 프로세스가 뜨면서 새 participant가 만들어집니다. 이미 떠 있는 participant로 송수신하려면 `attach`로 메인 프로세스에 붙어야 합니다.
+
+```powershell
+kubectl -n dds-test attach -it deploy/ddsclient-cli
 ```
 
-## CLI 명령
-
-topic 목록:
-
-```bash
-ddsclient list
-```
-
-메시지 수신:
-
-```bash
-ddsclient subscribe TimeTickInformation
-```
-
-메시지 송신:
-
-```bash
-ddsclient publish TimeTickInformation
-ddsclient publish SetSimulation
-```
-
-JSON 파일로 송신:
-
-```bash
-ddsclient publish SetSimulation --json /mnt/dds/messages/set-simulation.json
-cat /mnt/dds/messages/time-tick.json | ddsclient publish TimeTickInformation --stdin
-```
-
-CLI 사용법:
+붙은 뒤 shell에서 사용할 수 있는 명령:
 
 ```text
-ddsclient list [--config <path>]
-ddsclient publish <MessageName> [--config <path>] [--json <path>|--stdin]
-ddsclient subscribe <MessageName> [--config <path>]
+list
+status
+subscribe TimeTickInformation
+publish TimeTickInformation
+publish SetSimulation --json /tmp/set-simulation.json
+unsubscribe TimeTickInformation
+unsubscribe all
+help
 ```
 
-`publish`에서 JSON을 주지 않으면 기본 생성자로 메시지를 만들고, `Header.TimeStamp`, `Header.MsgID`, `Header.SrcSimID`, `Header.DstSimID`는 가능한 경우 기본값을 채웁니다.
+종료하지 않고 빠져나오려면 터미널의 attach detach 키를 사용합니다. 일반적인 kubectl 기본값은 `Ctrl+P` 다음 `Ctrl+Q`입니다. `exit`를 입력하면 shell 프로세스가 종료되어 Pod가 재시작될 수 있습니다.
 
-## 현재 로컬 클러스터 확인
+CLI가 시작될 때도 같은 안내를 콘솔에 출력합니다.
 
-현재 Docker Desktop context에 배포했다면 다음 명령으로 들어갑니다.
+## 독립 실행 명령
 
-```bash
-kubectl -n dds-test exec -it deploy/ddsclient-cli -- /bin/sh
-```
+아래 명령들은 매번 새 `DdsClient`와 새 DDS participant를 만듭니다. 빠른 단발 테스트에는 편하지만, Discovery UI에 떠 있는 shell participant와 동일한 participant는 아닙니다.
 
-ASAP에서 메시지를 쏘고 있다면 pod 안에서 해당 topic을 subscribe합니다.
-
-```bash
-ddsclient subscribe TimeTickInformation
-```
-
-반대로 이 pod에서 ASAP 쪽으로 메시지를 쏘려면:
-
-```bash
-ddsclient publish TimeTickInformation
+```powershell
+kubectl -n dds-test exec deploy/ddsclient-cli -- ddsclient list
+kubectl -n dds-test exec deploy/ddsclient-cli -- ddsclient publish TimeTickInformation
+kubectl -n dds-test exec -it deploy/ddsclient-cli -- ddsclient subscribe TimeTickInformation
 ```
 
 ## 설정
 
-CLI pod도 NuGet 패키지에 포함된 `/app/definitions` 설정 파일을 사용합니다.
+CLI Pod는 이미지 안의 `/app/definitions` 설정 파일을 사용합니다.
 
-```bash
+```text
 DDS_CLIENT_CONFIG_PATH=/app/definitions/dds_client.asap.xml
+DDS_INITIAL_PEERS=[0]@builtin.udpv4://dds-discovery.default.svc.cluster.local
+DDS_LOG_LEVEL=Debug
 ```
 
-환경별로 바꿀 수 있는 값은 [usage.md](usage.md)의 환경변수 Override 섹션과 [k8s-ddsclient.yaml](k8s-ddsclient.yaml)을 참고합니다.
+ConfigMap 없이 빌드 전에 `definitions/*.xml`을 수정하고 이미지를 다시 빌드하는 흐름을 기준으로 합니다. 환경별 override는 [usage.md](usage.md)와 [k8s-ddsclient.yaml](k8s-ddsclient.yaml)을 참고하세요.
