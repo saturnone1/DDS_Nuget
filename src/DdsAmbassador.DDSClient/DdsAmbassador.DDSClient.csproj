@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>DdsAmbassador.DDSClient</AssemblyName>
+    <RootNamespace>DdsAmbassador.DDSClient</RootNamespace>
+    <PackageId>DdsAmbassador.DDSClient</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>DdsAmbassador</Authors>
+    <Description>Typed DDS client helpers and RTI rtiddsgen workflow for DdsAmbassador messages.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryType>git</RepositoryType>
+    <PackageOutputPath>..\..\artifacts\packages</PackageOutputPath>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <NoWarn>$(NoWarn);CS8765;CS8767;CS8618;CS8604</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Rti.ConnextDds" Version="7.3.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Update="Generated\**\*.cs">
+      <Nullable>disable</Nullable>
+    </Compile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <Content Include="..\..\definitions\dds_client*.xml" Pack="true" PackagePath="contentFiles\any\any\definitions\" PackageCopyToOutput="true" />
+    <Content Include="..\..\definitions\topics.xml" Pack="true" PackagePath="contentFiles\any\any\definitions\" PackageCopyToOutput="true" />
+    <Content Include="..\..\definitions\qos_profiles.xml" Pack="true" PackagePath="contentFiles\any\any\definitions\" PackageCopyToOutput="true" />
+    <Content Include="..\..\definitions\DDSSim.xml" Pack="true" PackagePath="contentFiles\any\any\definitions\" PackageCopyToOutput="true" />
+    <Content Include="..\..\rti\license\**\*" Pack="true" PackagePath="rti\license\" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

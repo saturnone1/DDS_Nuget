@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  # DDS Client CLI를 수동 확인용으로 띄우는 namespace입니다.
+  # 실제 프로젝트에서는 팀/서비스 표준 namespace로 바꿔도 됩니다.
+  name: dds-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # 이 Deployment는 DDS 메시지를 자동 송수신하지 않습니다.
+  # 사용자가 kubectl exec로 접속해서 ddsclient CLI를 직접 실행하기 위한 대기 pod입니다.
+  name: ddsclient-cli
+  namespace: dds-test
+spec:
+  # 수동 CLI 접속용이므로 기본 1개면 충분합니다.
+  # 여러 사람이 동시에 확인해야 하면 replicas를 늘릴 수 있습니다.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ddsclient-cli
+  template:
+    metadata:
+      labels:
+        app: ddsclient-cli
+    spec:
+      containers:
+        - name: ddsclient
+          # 실제 registry 주소와 tag로 바꿔서 사용합니다.
+          # 이 이미지는 DdsAmbassador.DDSClient NuGet을 포함한 CLI/앱 이미지입니다.
+          image: ddsclient:local
+
+          # 개발/검증 환경에서 로컬 registry나 사내 registry tag를 그대로 쓸 때는 IfNotPresent가 편합니다.
+          # 항상 최신 이미지를 당겨야 하는 운영 정책이면 Always로 바꿉니다.
+          imagePullPolicy: IfNotPresent
+
+          # 이 pod는 CLI 접속을 위해 계속 떠 있는 shell입니다.
+          # 여기서 메시지를 자동으로 publish/subscribe하지 않습니다.
+          # 송수신 확인은 kubectl exec로 접속한 뒤 ddsclient 명령을 직접 실행합니다.
+          command:
+            - /bin/sh
+            - -c
+            - sleep infinity
+
+          env:
+            # DDS 설정 파일 경로입니다.
+            # ConfigMap/PV로 설정 파일을 주입하지 않고, NuGet contentFiles로 이미지에 포함된 파일을 사용합니다.
+            # 설정을 바꿔야 하면 NuGet 생성 전 definitions/*.xml을 수정하고 이미지를 다시 빌드합니다.
+            - name: DDS_CLIENT_CONFIG_PATH
+              value: /app/definitions/dds_client.asap.xml
+
+            # DDS domain id입니다.
+            # 같은 domain id를 사용하는 participant끼리만 discovery 및 송수신됩니다.
+            - name: DDS_DOMAIN_ID
+              value: "0"
+
+            # RTI participant name입니다.
+            # 로그나 RTI Admin Console 등에서 식별하기 쉽게 환경별로 바꿔도 됩니다.
+            - name: DDS_PARTICIPANT_NAME
+              value: DdsClientK8s
+
+            # Debug이면 송신/수신 topic, 타입, 메시지 상세를 콘솔에 출력합니다.
+            # 메시지 양이 많으면 로그가 커질 수 있으므로 운영 상시 사용 시에는 None 또는 Info를 고려합니다.
+            - name: DDS_LOG_LEVEL
+              value: Debug
+
+            # Discovery peer 설정입니다.
+            # 기본값은 Kubernetes 안의 ASAP discovery relay 주소입니다.
+            # 다른 namespace/service 이름을 쓰면 이 값을 바꿉니다.
+            # "none" 또는 "default"로 설정하면 파일에 있는 peer를 비우고 RTI default discovery를 사용합니다.
+            # 여러 peer를 넣을 때는 세미콜론으로 구분합니다.
+            - name: DDS_INITIAL_PEERS
+              value: "[0]@builtin.udpv4://dds-discovery.default.svc.cluster.local"
+
+            # 실제 user data 송수신에 사용할 multicast group 주소입니다.
+            # RTI DDS에서는 reader가 multicast receive_address를 광고하고,
+            # writer는 matched reader가 광고한 multicast locator로 데이터를 보냅니다.
+            # 따라서 QoS에는 별도 multicast send address를 두지 않습니다.
+            # 더 명확히 쓰고 싶으면 DDS_MULTICAST_RECEIVE_ADDRESS 이름을 대신 사용할 수 있습니다.
+            # K8s CNI/노드 네트워크/방화벽이 multicast를 허용해야 실제 multicast 송수신이 됩니다.
+            - name: DDS_MULTICAST_ADDRESS
+              value: "239.255.5.1"

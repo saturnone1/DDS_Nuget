@@ -1,0 +1,6 @@
+**/bin/
+**/obj/
+artifacts/
+DDSClient.iso
+.git/
+.vs/

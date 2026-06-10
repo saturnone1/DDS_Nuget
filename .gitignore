@@ -1,0 +1,20 @@
+**/bin/
+**/obj/
+artifacts/
+.airgap-check/
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+
+# Large local export image, not source.
+DDSClient.iso
+
+# RTI license files should be provided by the deployment environment.
+rti/license/*.dat
+rti/connext/rti_license.dat
+
+# Full RTI GUI/JRE payload is too large for normal git history. Generated DDS
+# C# sources are committed, and Linux Docker builds skip rtiddsgen when absent.
+rti/connext/resource/app/jre/

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds_client>
+  <domain_id>0</domain_id>
+  <transport>Rti</transport>
+  <log_level>None</log_level>
+  <participant_name>DdsAmbassadorClient</participant_name>
+  <topics_xml_path>topics.xml</topics_xml_path>
+  <qos_profiles_xml_path>qos_profiles.xml</qos_profiles_xml_path>
+  <dds_sim_xml_path>DDSSim.xml</dds_sim_xml_path>
+
+  <!-- No initial_peers means RTI default discovery, including multicast discovery
+       when multicast is allowed by the network.
+
+       User data multicast is controlled by qos_profiles.xml. The fixed
+       ReliableRealtime profile advertises multicast receive address 239.255.5.1
+       from DataReaders to matched DataWriters. -->
+</dds_client>

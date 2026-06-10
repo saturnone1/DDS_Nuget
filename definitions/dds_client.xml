@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds_client>
+  <domain_id>0</domain_id>
+  <transport>InMemory</transport>
+  <log_level>None</log_level>
+  <participant_name>DdsAmbassadorClient</participant_name>
+  <topics_xml_path>topics.xml</topics_xml_path>
+  <qos_profiles_xml_path>qos_profiles.xml</qos_profiles_xml_path>
+  <dds_sim_xml_path>DDSSim.xml</dds_sim_xml_path>
+
+  <!--
+    Leave initial_peers empty to use RTI default discovery, including multicast
+    discovery when the network allows it.
+
+    For ASAP peer discovery relay, uncomment and set a peer:
+
+    <initial_peers>
+      <peer>[0]@builtin.udpv4://dds-discovery.default.svc.cluster.local</peer>
+    </initial_peers>
+  -->
+</dds_client>
