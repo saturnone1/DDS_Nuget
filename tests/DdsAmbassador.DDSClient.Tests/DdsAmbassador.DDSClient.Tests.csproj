@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="Microsoft.TestPlatform.TestHost" Version="17.12.0" GeneratePathProperty="true" PrivateAssets="all" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" GeneratePathProperty="true" PrivateAssets="all" />
+    <PackageReference Include="Rti.ConnextDds" Version="7.3.1" GeneratePathProperty="true" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.abstractions" Version="2.0.3" GeneratePathProperty="true" PrivateAssets="all" />
+    <PackageReference Include="xunit.assert" Version="2.9.2" GeneratePathProperty="true" PrivateAssets="all" />
+    <PackageReference Include="xunit.extensibility.core" Version="2.9.2" GeneratePathProperty="true" PrivateAssets="all" />
+    <PackageReference Include="xunit.extensibility.execution" Version="2.9.2" GeneratePathProperty="true" PrivateAssets="all" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DdsAmbassador.DDSClient\DdsAmbassador.DDSClient.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(PkgMicrosoft_TestPlatform_TestHost)\lib\netcoreapp3.1\*.dll"
+          Link="%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
+    <None Include="$(PkgNewtonsoft_Json)\lib\netstandard2.0\Newtonsoft.Json.dll"
+          Link="Newtonsoft.Json.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
+    <None Include="$(Pkgxunit_abstractions)\lib\netstandard2.0\xunit.abstractions.dll"
+          Link="xunit.abstractions.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
+    <None Include="$(Pkgxunit_assert)\lib\netstandard1.1\xunit.assert.dll"
+          Link="xunit.assert.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
+    <None Include="$(Pkgxunit_extensibility_core)\lib\netstandard1.1\xunit.core.dll"
+          Link="xunit.core.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
+    <None Include="$(Pkgxunit_extensibility_execution)\lib\netstandard1.1\xunit.execution.dotnet.dll"
+          Link="xunit.execution.dotnet.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
+    <None Include="$(PkgRti_ConnextDds)\lib\netstandard2.0\Rti.ConnextDds.dll"
+          Link="Rti.ConnextDds.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
+  </ItemGroup>
+</Project>

@@ -31,6 +31,6 @@
     <Content Include="..\..\definitions\topics.xml" Pack="true" PackagePath="contentFiles\any\any\definitions\" PackageCopyToOutput="true" />
     <Content Include="..\..\definitions\qos_profiles.xml" Pack="true" PackagePath="contentFiles\any\any\definitions\" PackageCopyToOutput="true" />
     <Content Include="..\..\definitions\DDSSim.xml" Pack="true" PackagePath="contentFiles\any\any\definitions\" PackageCopyToOutput="true" />
-    <Content Include="..\..\rti\license\**\*" Pack="true" PackagePath="rti\license\" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\rti\license\**\*" Pack="true" PackagePath="contentFiles\any\any\" PackageCopyToOutput="true" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

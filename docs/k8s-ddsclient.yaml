@@ -52,7 +52,7 @@ spec:
             - name: DDS_PARTICIPANT_NAME
               value: DdsClientK8s
 
-            # Debug이면 송신/수신 topic과 메시지 상세정보를 콘솔에 출력합니다.
+            # Debug이면 송신/수신 topic 이름과 CLR 타입 이름을 콘솔에 출력합니다.
             # 운영 상시 사용 시에는 Info 또는 None을 권장합니다.
             - name: DDS_LOG_LEVEL
               value: Debug

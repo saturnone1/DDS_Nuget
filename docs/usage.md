@@ -18,21 +18,28 @@ dotnet pack .\src\DdsAmbassador.DDSClient\DdsAmbassador.DDSClient.csproj -c Rele
 artifacts/packages/DdsAmbassador.DDSClient.0.1.0.nupkg
 ```
 
-## 개발 프로젝트에 추가
-
-사용할 프로젝트에서 로컬 NuGet source를 추가합니다.
+airgap 또는 폐쇄망으로 반입할 때는 생성된 DDSClient 패키지를 의존 패키지들이 모여 있는 `third_party/nuget`에도 복사합니다. NuGet은 폴더 안의 `.nupkg`들을 패키지 소스로 사용할 수 있으므로, 별도 NuGet 서버 없이 DDSClient 패키지와 RTI/Microsoft 의존 패키지를 같은 폴더에 두면 됩니다.
 
 ```powershell
-dotnet nuget add source "Z:\A0. Code\DdsAmbassador\DDSClient\artifacts\packages" -n ddsclient-local
-dotnet nuget add source "Z:\A0. Code\DdsAmbassador\DDSClient\rti\nupkg" -n rti-local
+Copy-Item .\artifacts\packages\DdsAmbassador.DDSClient.*.nupkg .\third_party\nuget -Force
+```
+
+## 개발 프로젝트에 추가
+
+사용할 프로젝트에서 `third_party/nuget` 폴더를 로컬 NuGet source로 추가합니다.
+
+```powershell
+dotnet nuget add source "Z:\A0. Code\DdsAmbassador\DDSClient\third_party\nuget" -n ddsclient-offline
 dotnet add package DdsAmbassador.DDSClient --version 0.1.0
 ```
 
-사내 NuGet feed를 쓰는 경우에는 다음 패키지들을 같은 feed에 게시합니다.
+NuGet 서버는 필요하지 않습니다. 단, 아래 패키지들이 `third_party/nuget` 같은 하나의 폴더에 있어야 restore가 됩니다. DDSClient `.nupkg` 안에 RTI `.nupkg`를 중첩해 넣어도 NuGet restore가 패키지 소스로 사용하지 않으므로, 의존 패키지는 반드시 폴더에 별도 `.nupkg` 파일로 있어야 합니다.
 
 - `DdsAmbassador.DDSClient`
 - `Rti.ConnextDds`
 - `Rti.ConnextDds.Native`
+- `Rti.ConnextDds.Extra`
+- `Rti.ConnextDds.RequestReply`
 - RTI 패키지가 요구하는 transitive dependency
 
 ## 기본 파일 배치
@@ -46,6 +53,21 @@ definitions/dds_client.rti-multicast.xml
 definitions/topics.xml
 definitions/qos_profiles.xml
 definitions/DDSSim.xml
+```
+
+RTI license 파일도 contentFiles로 포함됩니다. 소비 프로젝트를 build/publish하면 기본적으로 실행 파일과 같은 output root에 복사됩니다.
+
+```text
+rti_license.dat
+PLACE_LICENSE_HERE.txt
+```
+
+운영 반입 전에는 `rti/license/rti_license.dat`가 실제 라이선스 파일인지 확인한 뒤 패키지를 만듭니다. placeholder 상태로 pack하면 소비 소프트웨어 output에도 placeholder가 같이 복사됩니다.
+
+소비 소프트웨어에서 license를 output root가 아닌 별도 위치에 두고 싶으면 해당 파일을 원하는 위치에 배치하고 실행 환경에서 license 경로를 명시합니다.
+
+```bash
+RTI_LICENSE_FILE=/app/license/rti_license.dat
 ```
 
 앱 컨테이너에서는 보통 다음 경로를 사용합니다.
@@ -159,7 +181,7 @@ using var subscription = client.Subscribe(
 
 - `domain_id`: DDS domain id입니다.
 - `transport`: `InMemory` 또는 `Rti`입니다. 실제 DDS 송수신은 `Rti`를 사용합니다.
-- `log_level`: `None`, `Error`, `Info`, `Debug` 중 하나입니다. `Debug`이면 송수신 메시지 상세를 콘솔에 출력합니다.
+- `log_level`: `None`, `Error`, `Info`, `Debug` 중 하나입니다. `Debug`이면 송수신 topic 이름과 CLR 타입 이름을 콘솔에 출력합니다.
 - `participant_name`: RTI participant name입니다.
 - `topics_xml_path`: `topics.xml` 위치입니다. 상대 경로면 설정 파일이 있는 폴더 기준입니다.
 - `qos_profiles_xml_path`: RTI QoS XML 위치입니다.
@@ -200,6 +222,7 @@ DDS_MULTICAST_ADDRESS=239.255.5.1
 - `DDS_DDSSIM_XML_PATH`: `DDSSim.xml` 경로
 - `DDS_MULTICAST_ADDRESS`: user data multicast group
 - `DDS_MULTICAST_RECEIVE_ADDRESS`: `DDS_MULTICAST_ADDRESS`와 같은 의미. reader receive address임을 명확히 쓰고 싶을 때 사용
+- `RTI_LICENSE_FILE`: RTI license 파일을 output root가 아닌 별도 위치에 둘 때 사용하는 경로
 
 `DDS_INITIAL_PEERS=none` 또는 `DDS_INITIAL_PEERS=default`로 설정하면 파일에 들어있는 peer를 비우고 RTI default discovery를 사용합니다.
 
@@ -314,11 +337,51 @@ env:
 
 - 이 패키지는 `net9.0` 대상입니다. 사용하는 앱도 .NET 9 runtime이 필요합니다.
 - RTI 의존성은 `Rti.ConnextDds 7.3.1` 기준입니다. RTI runtime/license 조건은 별도로 확인해야 합니다.
+- RTI license 파일은 기본적으로 소비 앱 output root의 `rti_license.dat`로 복사됩니다. 컨테이너에서는 `/app/rti_license.dat`가 됩니다.
 - Windows/Linux native library는 `Rti.ConnextDds.Native`가 RID별로 제공합니다.
-- 사내 private feed에는 `DdsAmbassador.DDSClient`와 RTI `.nupkg` 의존성을 함께 게시해야 합니다.
-- airgap 환경에서는 `rti/nupkg`, `third_party/nuget`, 필요한 .NET host/runtime 패키지를 로컬 feed에 모두 포함해야 합니다.
-- Windows에서 Linux용으로 cross-publish하려면 `Microsoft.NETCore.App.Host.linux-x64` 또는 `Microsoft.NETCore.App.Host.linux-arm64` 같은 host package가 로컬 feed에 있어야 할 수 있습니다.
-- Debug 로그는 메시지 전문을 콘솔에 찍습니다. 민감 정보나 고빈도 topic에서는 로그 용량에 주의해야 합니다.
+- 별도 NuGet 서버는 사용하지 않습니다. `third_party/nuget` 폴더 하나에 `DdsAmbassador.DDSClient`와 모든 의존 `.nupkg`를 함께 두고, 그 폴더를 NuGet source로 등록합니다.
+- airgap 환경에서는 필요한 RTI, Microsoft, xUnit, Newtonsoft, .NET host/runtime 패키지를 `third_party/nuget` 로컬 폴더 source에 모두 포함해야 합니다.
+- 현재 `third_party/nuget`에는 RTI Connext DDS 7.3.1 패키지들과 CLI `linux-x64` publish에 필요한 `Microsoft.NETCore.App.Host.linux-x64 9.0.11`이 포함되어 있습니다.
+- Debug 로그는 topic 이름과 CLR 타입 이름만 출력합니다. generated DDS 타입의 `ToString()`은 RTI native 초기화를 유발할 수 있으므로 기본 로그 경로에서는 호출하지 않습니다.
+
+## Airgap 반입 전 검증
+
+이 저장소는 외부 `nuget.org`를 보지 않도록 `NuGet.config`에 로컬 폴더 source만 등록합니다.
+
+```text
+third_party/nuget
+```
+
+폴더를 통째로 airgap 환경에 반입하기 전에 다음 스크립트를 실행합니다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-airgap.ps1
+```
+
+스크립트는 빈 `.airgap-check/packages`를 만들고 기존 global NuGet cache에 기대지 않도록 `--no-cache --force`로 다음을 검증합니다.
+
+- `dotnet restore`
+- `dotnet build -c Release --no-restore`
+- `dotnet test -c Release --no-build`: 현재 단위 테스트 10개
+- `dotnet pack`
+- `dotnet publish src/DdsAmbassador.DDSClient.Cli -r linux-x64 --self-contained false`
+
+성공하면 다음 산출물을 확인합니다.
+
+```text
+artifacts/packages/DdsAmbassador.DDSClient.0.1.0.nupkg
+third_party/nuget/DdsAmbassador.DDSClient.0.1.0.nupkg
+.airgap-check/ddsclient/ddsclient.dll
+```
+
+2026-06-11 기준 검증 결과는 `third_party/nuget` 단일 로컬 폴더 source만 사용해 restored package 20개, 단위 테스트 10개 통과, NuGet pack 및 `linux-x64` CLI publish 성공입니다. 검증 후 `third_party/nuget`에는 DDSClient 산출물을 포함해 `.nupkg` 30개가 있습니다.
+
+주의:
+
+- airgap PC에는 .NET 9 SDK가 설치되어 있어야 합니다.
+- Docker build까지 airgap에서 수행하려면 `mcr.microsoft.com/dotnet/sdk:9.0`과 `mcr.microsoft.com/dotnet/runtime:9.0` 이미지를 별도로 반입해 Docker에 load해야 합니다.
+- Linux에서 `DDSSim.xml` 변경 후 codegen까지 하려면 Linux용 `rti/connext/bin/rtiddsgen`이 필요합니다.
+- 현재 기본 반입 기준은 이미 생성된 `src/DdsAmbassador.DDSClient/Generated/*.cs` 파일로 build하는 흐름입니다.
 
 확인된 native asset:
 

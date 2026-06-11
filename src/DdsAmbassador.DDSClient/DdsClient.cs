@@ -157,14 +157,14 @@ public sealed class DdsClient : IDisposable
     {
         DdsClientLog.Debug(
             Options,
-            $"TX topic={topic.Name}, type={sample.GetType().FullName}{Environment.NewLine}{sample}");
+            $"TX topic={topic.Name}, type={sample.GetType().FullName}");
     }
 
     private void LogReceive(TopicDefinition topic, object sample)
     {
         DdsClientLog.Debug(
             Options,
-            $"RX topic={topic.Name}, type={sample.GetType().FullName}{Environment.NewLine}{sample}");
+            $"RX topic={topic.Name}, type={sample.GetType().FullName}");
     }
 
     private static IDdsTransport CreateDefaultTransport(DdsClientOptions options)

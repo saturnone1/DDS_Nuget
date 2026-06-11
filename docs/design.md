@@ -51,10 +51,10 @@ rtiddsgen -language c# -inputXml -update typefiles -d src/DdsAmbassador.DDSClien
 rti/connext
 ```
 
-RTI .NET NuGet 의존성은 로컬 NuGet feed로 사용합니다.
+RTI .NET NuGet 의존성은 로컬 NuGet 폴더 source로 사용합니다.
 
 ```text
-rti/nupkg
+third_party/nuget
 ```
 
 ## Topic 과 QoS 모델
@@ -81,21 +81,21 @@ AmbassadorProfiles::<qos_profile>
 Rti.ConnextDds 7.3.1
 ```
 
-`NuGet.config`에는 `rti/nupkg`가 포함되어 있어서 외부 feed 없이도 로컬에서 RTI 패키지를 restore할 수 있습니다.
+`NuGet.config`에는 `third_party/nuget` 하나만 포함되어 있어서 외부 NuGet 서버 없이도 로컬에서 RTI 패키지와 일반 NuGet dependency를 restore할 수 있습니다.
 
 패키지에는 다음 항목이 포함됩니다.
 
 - 생성된 DDS 타입.
 - `DdsClient` public API.
 - content file로 포함되는 `definitions/*.xml`.
-- `rti/license` 아래의 RTI license 파일.
+- content file로 포함되는 RTI license 파일. 소비 앱 build/publish output root에 `rti_license.dat`로 복사됩니다.
 
-DDSClient `.nupkg` 안에 RTI `.nupkg` 파일을 다시 포함하지는 않습니다. RTI 패키지는 `rti/nupkg` 또는 동등한 사내 private feed에서 의존성으로 resolve됩니다.
+DDSClient `.nupkg` 안에 RTI `.nupkg` 파일을 다시 포함하지는 않습니다. NuGet restore는 패키지 내부에 중첩된 `.nupkg`를 패키지 source로 사용하지 않기 때문입니다. 대신 배포 시에는 DDSClient 산출물 `.nupkg`와 RTI/Microsoft 의존 `.nupkg`를 모두 `third_party/nuget` 같은 하나의 폴더에 둡니다.
 
 ## 현재 한계
 
-- 기본 transport는 in-memory 구현이며 실제 DDS 네트워크 송수신이 아닙니다.
-- 실제 RTI publish/subscribe transport는 아직 `IDdsTransport` 뒤에 구현해야 합니다.
+- 기본 설정 파일인 `definitions/dds_client.xml`은 in-memory transport를 사용합니다. 실제 DDS 네트워크 송수신에는 RTI용 설정 파일이나 `UseRtiTransport=true`를 사용해야 합니다.
+- 자동 테스트는 RTI 네트워크 송수신까지 검증하지 않습니다. 설정 검증, direction 정책, in-memory publish/subscribe, build/pack/publish를 검증합니다.
 - 현재 `rti/connext` codegen 파일은 Windows RTI 설치본에서 복사한 것입니다. Linux Docker에서 codegen까지 하려면 Linux용 `rtiddsgen` 실행 파일이 `rti/connext/bin/rtiddsgen`에 있어야 합니다.
 - RTI가 생성한 C# 코드는 nullable annotation이 없어서, 해당 생성 코드에서 발생하는 nullable 관련 warning은 프로젝트 수준에서 억제했습니다.
 
