@@ -10,6 +10,12 @@
 docker build -t ddsclient:local .
 ```
 
+Docker 빌드는 CMake wrapper를 통해 `dds_all`과 `dds_publish_cli` target을 실행합니다. 이미지 build context에 `rti/connext/bin/rtiddsgen`이 있으면 DDS 타입 코드를 다시 생성합니다. Linux용 `rtiddsgen`이 없고, 생성된 C# 파일을 이미 갱신한 상태라면 다음처럼 의도적으로 생성을 건너뜁니다.
+
+```powershell
+docker build --build-arg SKIP_DDSGEN=true -t ddsclient:local .
+```
+
 원격 Kubernetes 클러스터에서 확인할 때:
 
 ```powershell
@@ -26,11 +32,11 @@ kubectl apply -f docs/k8s-ddsclient.yaml
 kubectl -n dds-test get pods
 ```
 
-Pod는 기본적으로 `ddsclient shell`로 실행됩니다. 이 모드는 하나의 `DdsClient` 인스턴스를 생성하고 계속 유지합니다. 따라서 DDS Discovery Service UI에 보이는 participant와 실제 송수신에 쓰는 participant가 같습니다.
+Pod는 기본적으로 `dotnet /app/ddsclient.dll shell`로 실행됩니다. 이 모드는 하나의 `DdsClient` 인스턴스를 생성하고 계속 유지합니다. 따라서 DDS Discovery Service UI에 보이는 participant와 실제 송수신에 쓰는 participant가 같습니다.
 
 ## 같은 Participant로 명령 실행
 
-중요: `kubectl exec ... ddsclient publish`를 실행하면 새 프로세스가 뜨면서 새 participant가 만들어집니다. 이미 떠 있는 participant로 송수신하려면 `attach`로 메인 프로세스에 붙어야 합니다.
+중요: `kubectl exec ... dotnet /app/ddsclient.dll publish`를 실행하면 새 프로세스가 뜨면서 새 participant가 만들어집니다. 이미 떠 있는 participant로 송수신하려면 `attach`로 메인 프로세스에 붙어야 합니다.
 
 ```powershell
 kubectl -n dds-test attach -it deploy/ddsclient-cli
@@ -58,10 +64,21 @@ CLI가 시작될 때도 같은 안내를 콘솔에 출력합니다.
 아래 명령들은 매번 새 `DdsClient`와 새 DDS participant를 만듭니다. 빠른 단발 테스트에는 편하지만, Discovery UI에 떠 있는 shell participant와 동일한 participant는 아닙니다.
 
 ```powershell
-kubectl -n dds-test exec deploy/ddsclient-cli -- ddsclient list
-kubectl -n dds-test exec deploy/ddsclient-cli -- ddsclient publish TimeTickInformation
-kubectl -n dds-test exec -it deploy/ddsclient-cli -- ddsclient subscribe TimeTickInformation
+kubectl -n dds-test exec deploy/ddsclient-cli -- dotnet /app/ddsclient.dll list
+kubectl -n dds-test exec deploy/ddsclient-cli -- dotnet /app/ddsclient.dll publish TimeTickInformation
+kubectl -n dds-test exec -it deploy/ddsclient-cli -- dotnet /app/ddsclient.dll subscribe TimeTickInformation
 ```
+
+자동 검증에서는 같은 participant를 유지하며 반복 송신하거나, 지정한 수만큼
+수신한 뒤 종료할 수 있습니다.
+
+```powershell
+dotnet /app/ddsclient.dll publish TimeTickInformation --repeat 20 --interval-ms 300
+dotnet /app/ddsclient.dll subscribe TimeTickInformation --count 1 --timeout-ms 20000
+```
+
+`--count`에 도달하면 종료 코드 0으로 끝나고, `--timeout-ms` 안에 도달하지
+못하면 종료 코드 1로 끝납니다. C++ `ddsclient`도 같은 옵션과 동작을 사용합니다.
 
 ## 설정
 

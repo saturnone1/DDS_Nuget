@@ -23,7 +23,7 @@
 4. publish/subscribe 요청이 `topics.xml`의 `direction` 정책에 맞는지 확인합니다.
 5. 요청을 `IDdsTransport`로 전달합니다.
 
-현재 기본 transport는 `InMemoryDdsTransport`입니다. 이 transport는 설정 검증과 테스트에는 유용하지만 실제 DDS 네트워크 송수신용은 아닙니다. 운영용 구현은 `IDdsTransport` 뒤에 RTI transport를 붙이고, 생성된 `rtiddsgen` 타입과 `Rti.ConnextDds`를 사용하도록 확장하는 구조입니다.
+현재 기본 transport는 `InMemoryDdsTransport`입니다. 이 transport는 설정 검증과 테스트에 유용하지만 실제 DDS 네트워크 송수신용은 아닙니다. `DdsClientOptions.UseRtiTransport` 또는 `DDS_USE_RTI_TRANSPORT=true`를 사용하면 `RtiDdsTransport`가 생성되고, 생성된 `rtiddsgen` 타입과 `Rti.ConnextDds`로 실제 DDS publish/subscribe를 수행합니다.
 
 ## 코드 생성
 
@@ -45,10 +45,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\generate-dds.ps1 -Cl
 rtiddsgen -language c# -inputXml -update typefiles -d src/DdsAmbassador.DDSClient/Generated definitions/DDSSim.xml
 ```
 
-이 저장소는 RTI codegen 파일이 다음 위치에 있다고 가정합니다.
+스크립트는 RTI codegen 실행 파일을 다음 순서로 찾습니다.
 
 ```text
-rti/connext
+PATH
+NDDSHOME/bin
+rti/**/bin/rtiddsgen
 ```
 
 RTI .NET NuGet 의존성은 로컬 NuGet feed로 사용합니다.
@@ -92,10 +94,11 @@ Rti.ConnextDds 7.3.1
 
 DDSClient `.nupkg` 안에 RTI `.nupkg` 파일을 다시 포함하지는 않습니다. RTI 패키지는 `rti/nupkg` 또는 동등한 사내 private feed에서 의존성으로 resolve됩니다.
 
+Linux/CI 빌드는 root `CMakeLists.txt`를 최상위 wrapper로 사용합니다. CMake는 각 `.csproj`에 대해 `dotnet restore/build/test/pack/publish`, DDS codegen, 정의 검증을 순서대로 호출합니다.
+
 ## 현재 한계
 
 - 기본 transport는 in-memory 구현이며 실제 DDS 네트워크 송수신이 아닙니다.
-- 실제 RTI publish/subscribe transport는 아직 `IDdsTransport` 뒤에 구현해야 합니다.
-- 현재 `rti/connext` codegen 파일은 Windows RTI 설치본에서 복사한 것입니다. Linux Docker에서 codegen까지 하려면 Linux용 `rtiddsgen` 실행 파일이 `rti/connext/bin/rtiddsgen`에 있어야 합니다.
+- RTI Connext 설치본 전체는 repository에 포함하지 않습니다. 메시지 재생성이 필요한 개발 장비나 CI 이미지에서 `rtiddsgen`을 별도로 제공해야 합니다.
 - RTI가 생성한 C# 코드는 nullable annotation이 없어서, 해당 생성 코드에서 발생하는 nullable 관련 warning은 프로젝트 수준에서 억제했습니다.
 

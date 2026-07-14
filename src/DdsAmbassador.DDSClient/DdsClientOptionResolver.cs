@@ -6,7 +6,6 @@ internal static class DdsClientOptionResolver
     {
         return ResolveRequiredFile(
             options.TopicsXmlPath,
-            "DDS_TOPICS_XML_PATH",
             Path.Combine("definitions", "topics.xml"),
             nameof(options.TopicsXmlPath));
     }
@@ -15,20 +14,15 @@ internal static class DdsClientOptionResolver
     {
         return ResolveRequiredFile(
             options.QosProfilesXmlPath,
-            "DDS_QOS_PROFILES_XML_PATH",
             Path.Combine("definitions", "qos_profiles.xml"),
             nameof(options.QosProfilesXmlPath));
     }
 
     public static string? ResolveDdsSimXmlPath(DdsClientOptions options, string topicsXmlPath)
     {
-        var explicitPath = FirstNonEmpty(
-            options.DdsSimXmlPath,
-            Environment.GetEnvironmentVariable("DDS_DDSSIM_XML_PATH"));
-
-        if (!string.IsNullOrWhiteSpace(explicitPath))
+        if (!string.IsNullOrWhiteSpace(options.DdsSimXmlPath))
         {
-            return RequireFile(explicitPath, nameof(options.DdsSimXmlPath));
+            return RequireFile(options.DdsSimXmlPath, nameof(options.DdsSimXmlPath));
         }
 
         var candidate = Path.Combine(Path.GetDirectoryName(topicsXmlPath) ?? ".", "DDSSim.xml");
@@ -37,46 +31,22 @@ internal static class DdsClientOptionResolver
 
     public static bool ResolveUseRtiTransport(DdsClientOptions options)
     {
-        if (options.UseRtiTransport)
-        {
-            return true;
-        }
-
-        return bool.TryParse(Environment.GetEnvironmentVariable("DDS_USE_RTI_TRANSPORT"), out var value) && value;
+        return options.UseRtiTransport;
     }
 
     public static IReadOnlyList<string> ResolveInitialPeers(DdsClientOptions options)
     {
-        if (options.InitialPeers.Count > 0)
-        {
-            return options.InitialPeers;
-        }
-
-        var value = Environment.GetEnvironmentVariable("DDS_INITIAL_PEERS");
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return [];
-        }
-
-        return value
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(peer => !string.IsNullOrWhiteSpace(peer))
-            .ToArray();
+        return options.InitialPeers;
     }
 
     private static string ResolveRequiredFile(
         string? optionValue,
-        string environmentVariableName,
         string defaultRelativePath,
         string optionName)
     {
-        var explicitPath = FirstNonEmpty(
-            optionValue,
-            Environment.GetEnvironmentVariable(environmentVariableName));
-
-        if (!string.IsNullOrWhiteSpace(explicitPath))
+        if (!string.IsNullOrWhiteSpace(optionValue))
         {
-            return RequireFile(explicitPath, optionName);
+            return RequireFile(optionValue, optionName);
         }
 
         foreach (var baseDirectory in EnumerateBaseDirectories())
@@ -89,7 +59,7 @@ internal static class DdsClientOptionResolver
         }
 
         throw new DdsConfigurationException(
-            $"{optionName} is required. Set it explicitly, set {environmentVariableName}, or place {defaultRelativePath} under the current or output directory.");
+            $"{optionName} is required. Set it explicitly or place {defaultRelativePath} under the current or output directory.");
     }
 
     private static string RequireFile(string path, string optionName)
@@ -116,8 +86,4 @@ internal static class DdsClientOptionResolver
         }
     }
 
-    private static string? FirstNonEmpty(params string?[] values)
-    {
-        return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
-    }
 }

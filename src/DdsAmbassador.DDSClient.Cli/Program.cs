@@ -52,8 +52,15 @@ try
             {
                 var sampleType = ResolveMessageType(publishTopic);
                 var sample = await CreateSample(sampleType, options);
-                client.Publish(publishTopic, sample);
-                Console.WriteLine($"송신 완료: {publishTopic} ({sampleType.FullName})");
+                for (var index = 0; index < options.Repeat; index++)
+                {
+                    client.Publish(publishTopic, sample);
+                    if (index + 1 < options.Repeat && options.IntervalMs > 0)
+                    {
+                        await Task.Delay(options.IntervalMs).ConfigureAwait(false);
+                    }
+                }
+                Console.WriteLine($"송신 완료: {publishTopic} ({sampleType.FullName}), count={options.Repeat}");
             }
 
             return 0;
@@ -72,14 +79,38 @@ try
                 };
 
                 var sampleType = ResolveMessageType(subscribeTopic);
+                var receivedCount = 0;
+                var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 using var subscription = client.Subscribe(subscribeTopic, sampleType, sample =>
                 {
                     Console.WriteLine($"[{DateTimeOffset.Now:O}] {subscribeTopic}");
                     Console.WriteLine(sample);
+                    if (options.Count > 0 && Interlocked.Increment(ref receivedCount) >= options.Count)
+                    {
+                        completed.TrySetResult();
+                    }
                 });
 
                 Console.WriteLine($"수신 대기 중: {subscribeTopic}, DDS domain={client.Options.DomainId}. 중지하려면 Ctrl+C를 누르세요.");
-                await Task.Delay(Timeout.InfiniteTimeSpan, shutdown.Token).ConfigureAwait(false);
+                if (options.Count > 0)
+                {
+                    if (options.TimeoutMs > 0)
+                    {
+                        await completed.Task.WaitAsync(TimeSpan.FromMilliseconds(options.TimeoutMs), shutdown.Token).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await completed.Task.WaitAsync(shutdown.Token).ConfigureAwait(false);
+                    }
+                }
+                else if (options.TimeoutMs > 0)
+                {
+                    await Task.Delay(options.TimeoutMs, shutdown.Token).ConfigureAwait(false);
+                }
+                else
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, shutdown.Token).ConfigureAwait(false);
+                }
             }
 
             return 0;
@@ -192,8 +223,15 @@ static async Task<int> RunShell(CliOptions options)
                         var publishTopic = publishOptions.Topic!;
                         var publishType = ResolveMessageType(publishTopic);
                         var sample = await CreateSample(publishType, publishOptions).ConfigureAwait(false);
-                        client.Publish(publishTopic, sample);
-                        WriteSuccess($"송신 완료: {publishTopic} ({publishType.FullName})");
+                        for (var index = 0; index < publishOptions.Repeat; index++)
+                        {
+                            client.Publish(publishTopic, sample);
+                            if (index + 1 < publishOptions.Repeat && publishOptions.IntervalMs > 0)
+                            {
+                                await Task.Delay(publishOptions.IntervalMs, shutdown.Token).ConfigureAwait(false);
+                            }
+                        }
+                        WriteSuccess($"송신 완료: {publishTopic} ({publishType.FullName}), count={publishOptions.Repeat}");
                         break;
 
                     case "subscribe":
@@ -322,11 +360,11 @@ static async Task<object> CreateSample(Type sampleType, CliOptions options)
             ?? throw new InvalidOperationException($"{sampleType.FullName} 인스턴스를 생성할 수 없습니다.");
     }
 
-    ApplyCommonDefaults(sample, options.Topic);
+    ApplyCommonDefaults(sample, options.Topic, json);
     return sample;
 }
 
-static void ApplyCommonDefaults(object sample, string? topic)
+static void ApplyCommonDefaults(object sample, string? topic, string? json)
 {
     var headerProperty = sample.GetType().GetProperty("Header");
     if (headerProperty?.CanRead != true || headerProperty.CanWrite != true)
@@ -347,9 +385,11 @@ static void ApplyCommonDefaults(object sample, string? topic)
     }
 
     SetIfDefault(header, "TimeStamp", (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-    SetEnumIfDefault(header, "MsgID", topic);
-    SetEnumIfDefault(header, "SrcSimID", Environment.GetEnvironmentVariable("DDS_CLI_SRC_SIM_ID") ?? "TCC");
-    SetEnumIfDefault(header, "DstSimID", Environment.GetEnvironmentVariable("DDS_CLI_DST_SIM_ID") ?? "TDS");
+    SetEnumIfMissingOrDefault(header, "MsgID", topic, json);
+    SetEnumIfMissingOrDefault(
+        header, "SrcSimID", Environment.GetEnvironmentVariable("DDS_CLI_SRC_SIM_ID") ?? "TCC", json);
+    SetEnumIfMissingOrDefault(
+        header, "DstSimID", Environment.GetEnvironmentVariable("DDS_CLI_DST_SIM_ID") ?? "TDS", json);
 }
 
 static void SetIfDefault<T>(object target, string propertyName, T value)
@@ -366,7 +406,7 @@ static void SetIfDefault<T>(object target, string propertyName, T value)
     }
 }
 
-static void SetEnumIfDefault(object target, string propertyName, string? value)
+static void SetEnumIfMissingOrDefault(object target, string propertyName, string? value, string? json)
 {
     if (string.IsNullOrWhiteSpace(value))
     {
@@ -380,7 +420,8 @@ static void SetEnumIfDefault(object target, string propertyName, string? value)
     }
 
     var current = property.GetValue(target);
-    if (!Equals(current, Activator.CreateInstance(property.PropertyType)))
+    if (ContainsJsonProperty(json, propertyName) &&
+        !Equals(current, Activator.CreateInstance(property.PropertyType)))
     {
         return;
     }
@@ -401,8 +442,8 @@ static void PrintUsage()
           ddsclient list [--config <path>]
           ddsclient shell [--config <path>]
           ddsclient idle [--config <path>]
-          ddsclient publish <MessageName> [--config <path>] [--json <path>|--stdin]
-          ddsclient subscribe <MessageName> [--config <path>]
+          ddsclient publish <MessageName> [--config <path>] [--json <path>|--stdin] [--repeat <n>] [--interval-ms <n>]
+          ddsclient subscribe <MessageName> [--config <path>] [--count <n>] [--timeout-ms <n>]
 
         예시:
           ddsclient list --config /app/definitions/dds_client.asap.xml
@@ -542,6 +583,44 @@ static JsonSerializerOptions CreateJsonOptions()
     return options;
 }
 
+static bool ContainsJsonProperty(string? json, string propertyName)
+{
+    if (string.IsNullOrWhiteSpace(json))
+    {
+        return false;
+    }
+
+    using var document = JsonDocument.Parse(json);
+    return ContainsJsonPropertyElement(document.RootElement, propertyName);
+}
+
+static bool ContainsJsonPropertyElement(JsonElement element, string propertyName)
+{
+    if (element.ValueKind == JsonValueKind.Object)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.Name.Equals(propertyName, StringComparison.OrdinalIgnoreCase) ||
+                ContainsJsonPropertyElement(property.Value, propertyName))
+            {
+                return true;
+            }
+        }
+    }
+    else if (element.ValueKind == JsonValueKind.Array)
+    {
+        foreach (var item in element.EnumerateArray())
+        {
+            if (ContainsJsonPropertyElement(item, propertyName))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 internal sealed class CliOptions
 {
     public string? ConfigPath { get; private init; }
@@ -552,12 +631,24 @@ internal sealed class CliOptions
 
     public bool ReadStdin { get; private init; }
 
+    public int Count { get; private init; }
+
+    public int TimeoutMs { get; private init; }
+
+    public int Repeat { get; private init; } = 1;
+
+    public int IntervalMs { get; private init; }
+
     public static CliOptions Parse(string[] args)
     {
         string? configPath = null;
         string? topic = null;
         string? jsonPath = null;
         var readStdin = false;
+        var count = 0;
+        var timeoutMs = 0;
+        var repeat = 1;
+        var intervalMs = 0;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -574,6 +665,18 @@ internal sealed class CliOptions
                 case "--stdin":
                     readStdin = true;
                     break;
+                case "--count":
+                    count = ReadNonNegativeInt(args, ref i);
+                    break;
+                case "--timeout-ms":
+                    timeoutMs = ReadNonNegativeInt(args, ref i);
+                    break;
+                case "--repeat":
+                    repeat = ReadPositiveInt(args, ref i);
+                    break;
+                case "--interval-ms":
+                    intervalMs = ReadNonNegativeInt(args, ref i);
+                    break;
                 default:
                     topic ??= args[i];
                     break;
@@ -585,7 +688,11 @@ internal sealed class CliOptions
             ConfigPath = configPath,
             Topic = topic,
             JsonPath = jsonPath,
-            ReadStdin = readStdin
+            ReadStdin = readStdin,
+            Count = count,
+            TimeoutMs = timeoutMs,
+            Repeat = repeat,
+            IntervalMs = intervalMs
         };
     }
 
@@ -598,5 +705,23 @@ internal sealed class CliOptions
 
         index++;
         return args[index];
+    }
+
+    private static int ReadNonNegativeInt(string[] args, ref int index)
+    {
+        var option = args[index];
+        var value = ReadValue(args, ref index);
+        return int.TryParse(value, out var parsed) && parsed >= 0
+            ? parsed
+            : throw new ArgumentException($"{option} 옵션에는 0 이상의 정수가 필요합니다.");
+    }
+
+    private static int ReadPositiveInt(string[] args, ref int index)
+    {
+        var option = args[index];
+        var value = ReadValue(args, ref index);
+        return int.TryParse(value, out var parsed) && parsed > 0
+            ? parsed
+            : throw new ArgumentException($"{option} 옵션에는 1 이상의 정수가 필요합니다.");
     }
 }

@@ -14,6 +14,7 @@ namespace DdsAmbassador.DDSClient.Transport;
 public sealed class RtiDdsTransport : IDdsTransport
 {
     private readonly object _gate = new();
+    private readonly DdsClientOptions _options;
     private readonly DomainParticipant _participant;
     private readonly Publisher _publisher;
     private readonly Subscriber _subscriber;
@@ -27,6 +28,7 @@ public sealed class RtiDdsTransport : IDdsTransport
     public RtiDdsTransport(DdsClientOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+        _options = options;
 
         var qosProfilesXmlPath = CreateEffectiveQosProfilesXmlPath(
             DdsClientOptionResolver.ResolveQosProfilesXmlPath(options));
@@ -41,6 +43,30 @@ public sealed class RtiDdsTransport : IDdsTransport
             var participantQos = _qosProvider?.GetDomainParticipantQos()
                 ?? QosProvider.Default.GetDomainParticipantQos();
 
+            // A QoS file that only defines writer/reader profiles can yield an
+            // empty participant initial-peer list. Restore RTI's defaults so
+            // multicast/shared-memory discovery remains bidirectional.
+            if (initialPeers.Count == 0 && participantQos.Discovery.InitialPeers.Count == 0)
+            {
+                var defaultInitialPeers =
+                    QosProvider.Default.GetDomainParticipantQos().Discovery.InitialPeers.ToArray();
+                if (defaultInitialPeers.Length == 0)
+                {
+                    defaultInitialPeers =
+                    [
+                        "builtin.udpv4://239.255.0.1",
+                        "builtin.shmem://"
+                    ];
+                }
+                participantQos = participantQos.WithDiscovery(discovery =>
+                {
+                    foreach (var peer in defaultInitialPeers)
+                    {
+                        discovery.InitialPeers.Add(peer);
+                    }
+                });
+            }
+
             if (!string.IsNullOrWhiteSpace(options.ParticipantName))
             {
                 participantQos = participantQos.WithParticipantName(name =>
@@ -48,6 +74,14 @@ public sealed class RtiDdsTransport : IDdsTransport
                     name.Name = options.ParticipantName;
                 });
             }
+
+            // Use RTI's UUID-based automatic identity so separately launched
+            // .NET processes cannot reuse the same participant GUID prefix.
+            participantQos = participantQos.WithWireProtocol(wireProtocol =>
+            {
+                wireProtocol.RtpsAutoIdKind =
+                    Rti.Dds.Core.Policy.WireProtocolAutoKind.FromUuid;
+            });
 
             if (initialPeers.Count > 0)
             {
@@ -165,7 +199,7 @@ public sealed class RtiDdsTransport : IDdsTransport
             ? _publisher.CreateDataWriter(typedTopic)
             : _publisher.CreateDataWriter(typedTopic, qos);
 
-        return new RtiWriter<T>(writer);
+        return new RtiWriter<T>(_options, writer);
     }
 
     private IDisposable CreateSubscriptionCore<T>(TopicDefinition topic, Action<object> handler)
@@ -176,7 +210,7 @@ public sealed class RtiDdsTransport : IDdsTransport
             ? _subscriber.CreateDataReader(typedTopic)
             : _subscriber.CreateDataReader(typedTopic, qos);
 
-        return new RtiSubscription<T>(reader, sample => handler(sample!));
+        return new RtiSubscription<T>(_options, reader, sample => handler(sample!));
     }
 
     private object InvokeGeneric(string methodName, Type sampleType, params object[] args)
@@ -303,10 +337,14 @@ public sealed class RtiDdsTransport : IDdsTransport
         void Write(object sample);
     }
 
-    private sealed class RtiWriter<T>(DataWriter<T> writer) : IRtiWriter
+    private sealed class RtiWriter<T>(DdsClientOptions options, DataWriter<T> writer) : IRtiWriter
     {
         public void Write(object sample)
         {
+            DdsClientLog.Debug(
+                options,
+                $"Writer<{typeof(T).FullName}> matched={writer.PublicationMatchedStatus.CurrentCount}, " +
+                $"incompatibleQos={writer.OfferedIncompatibleQosStatus.TotalCount.Value}");
             writer.Write((T)sample);
         }
     }
@@ -329,6 +367,7 @@ public sealed class RtiDdsTransport : IDdsTransport
 
     private sealed class RtiSubscription<T> : IDisposable
     {
+        private readonly DdsClientOptions _options;
         private readonly DataReader<T> _reader;
         private readonly ReadCondition _readCondition;
         private readonly GuardCondition _shutdownCondition = new();
@@ -337,8 +376,9 @@ public sealed class RtiDdsTransport : IDdsTransport
         private readonly Thread _worker;
         private int _disposed;
 
-        public RtiSubscription(DataReader<T> reader, Action<T> handler)
+        public RtiSubscription(DdsClientOptions options, DataReader<T> reader, Action<T> handler)
         {
+            _options = options;
             _reader = reader;
             _handler = handler;
             _readCondition = _reader.CreateReadCondition(DataState.Any);
@@ -407,7 +447,17 @@ public sealed class RtiDdsTransport : IDdsTransport
             {
                 if (sample.Info.ValidData)
                 {
-                    _handler(sample.Data);
+                    try
+                    {
+                        _handler(sample.Data);
+                    }
+                    catch (Exception ex) when (_disposed == 0)
+                    {
+                        DdsClientLog.Error(
+                            _options,
+                            $"Subscriber handler failed for type '{typeof(T).FullName}'. The subscription will continue.",
+                            ex);
+                    }
                 }
             }
         }

@@ -12,6 +12,7 @@
     <RepositoryType>git</RepositoryType>
     <PackageOutputPath>..\..\artifacts\packages</PackageOutputPath>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <!-- RTI rtiddsgen output is not nullable-annotated; keep this list limited to generated-code warnings. -->
     <NoWarn>$(NoWarn);CS8765;CS8767;CS8618;CS8604</NoWarn>
   </PropertyGroup>
 

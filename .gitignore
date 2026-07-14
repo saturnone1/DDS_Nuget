@@ -1,6 +1,8 @@
 **/bin/
 **/obj/
 artifacts/
+build/
+build-*/
 .airgap-check/
 .vs/
 .idea/
@@ -15,6 +17,7 @@ DDSClient.iso
 rti/license/*.dat
 rti/connext/rti_license.dat
 
-# Full RTI GUI/JRE payload is too large for normal git history. Generated DDS
-# C# sources are committed, and Linux Docker builds skip rtiddsgen when absent.
-rti/connext/resource/app/jre/
+# Keep RTI Connext installations local. The repository keeps generated C# files,
+# so rtiddsgen is needed only when DDS_GENERATE=ON or generate-dds.* is run.
+rti/connext/*
+!rti/connext/README.md

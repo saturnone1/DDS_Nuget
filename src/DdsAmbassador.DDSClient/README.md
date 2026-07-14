@@ -27,7 +27,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\generate-dds.ps1 -Cl
 rtiddsgen -language c# -inputXml -update typefiles -d src/DdsAmbassador.DDSClient/Generated definitions/DDSSim.xml
 ```
 
-이 저장소는 기본적으로 RTI codegen 파일을 `rti/connext`에서 찾고, RTI NuGet 의존성은 `rti/nupkg`에서 restore합니다.
+스크립트는 `PATH`, `NDDSHOME/bin`, `rti/**/bin/rtiddsgen` 순서로 RTI codegen 실행 파일을 찾습니다. RTI NuGet 의존성은 `rti/nupkg`에서 restore합니다.
 
 ## 빠른 사용
 
@@ -52,9 +52,9 @@ using var client = DdsClient.Connect();
 컨테이너 또는 Kubernetes pod 안에서는 다음처럼 확인합니다.
 
 ```bash
-ddsclient list
-ddsclient subscribe TimeTickInformation
-ddsclient publish SetSimulation
+dotnet /app/ddsclient.dll list
+dotnet /app/ddsclient.dll subscribe TimeTickInformation
+dotnet /app/ddsclient.dll publish SetSimulation
 ```
 
 ## Windows/Linux

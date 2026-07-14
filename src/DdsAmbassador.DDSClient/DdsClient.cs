@@ -52,6 +52,7 @@ public sealed class DdsClient : IDisposable
 
     public IDdsPublisher<T> CreatePublisher<T>()
     {
+        ThrowIfDisposed();
         var topic = ResolveTopic(typeof(T));
         EnsureCanPublish(topic);
         _transport.CreatePublisher(topic, typeof(T));
@@ -60,6 +61,7 @@ public sealed class DdsClient : IDisposable
 
     public IDisposable CreateSubscriber<T>(Action<T> handler)
     {
+        ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(handler);
 
         var topic = ResolveTopic(typeof(T));

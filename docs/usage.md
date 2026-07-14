@@ -1,14 +1,39 @@
 # DdsAmbassador.DDSClient NuGet 사용법
 
-이 문서는 `DdsAmbassador.DDSClient` NuGet 패키지를 개발 프로젝트에 추가하고, 코드에서 DDS publish/subscribe API를 사용하는 방법을 설명합니다. Kubernetes에서 CLI로 직접 확인하는 절차는 [cli.md](cli.md)를 참고합니다.
+이 문서는 `DdsAmbassador.DDSClient` NuGet 패키지를 개발 프로젝트에 추가하고, 코드에서 DDS publish/subscribe API를 사용하는 방법을 설명합니다. 공개 API별 설명은 [api.md](api.md), Kubernetes에서 CLI로 직접 확인하는 절차는 [cli.md](cli.md), C++ 사용법은 [DDSCPP 라이브러리 사용법](../../DDSCPP/docs/library-usage.md)을 참고합니다.
 
 ## 패키지 만들기
 
 이 저장소에서 NuGet 패키지를 생성합니다.
 
+Windows에서 메시지 재생성까지 함께 할 때:
+
 ```powershell
-dotnet restore .\DdsAmbassador.DDSClient.sln
-dotnet build .\DdsAmbassador.DDSClient.sln -c Release
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build-package.ps1 -Generate -Clean -Version 0.1.1
+```
+
+이 명령은 DDS 타입 재생성, restore, Release 빌드, 테스트, NuGet pack을 순서대로 실행합니다. `-Version`을 생략하면 현재 `.csproj`의 버전을 그대로 사용합니다.
+패키징 전에 `DDSSim.xml`, `topics.xml`, generated `DDSSim.cs`가 서로 맞는지도 검증합니다.
+
+Linux/CI에서는 CMake wrapper를 사용할 수 있습니다. CMake는 각 `.csproj`에 대한 `dotnet` 명령을 호출하는 최상위 진입점입니다.
+
+```bash
+cmake -S . -B build
+cmake --build build
+cmake --build build --target dds_publish_cli
+```
+
+기본 CMake build는 커밋된 generated C# 파일을 사용합니다. `DDSSim.xml` 메시지를 변경해서 `rtiddsgen`으로 C# 파일을 다시 만들 때만 `-DDDS_GENERATE=ON`을 지정합니다.
+
+직접 실행하려면 다음 순서를 사용합니다.
+
+```powershell
+dotnet restore .\src\DdsAmbassador.DDSClient\DdsAmbassador.DDSClient.csproj
+dotnet restore .\src\DdsAmbassador.DDSClient.Cli\DdsAmbassador.DDSClient.Cli.csproj
+dotnet restore .\tests\DdsAmbassador.DDSClient.Tests\DdsAmbassador.DDSClient.Tests.csproj
+dotnet build .\src\DdsAmbassador.DDSClient\DdsAmbassador.DDSClient.csproj -c Release --no-restore
+dotnet build .\src\DdsAmbassador.DDSClient.Cli\DdsAmbassador.DDSClient.Cli.csproj -c Release --no-restore
+dotnet test .\tests\DdsAmbassador.DDSClient.Tests\DdsAmbassador.DDSClient.Tests.csproj -c Release --no-restore
 dotnet pack .\src\DdsAmbassador.DDSClient\DdsAmbassador.DDSClient.csproj -c Release --no-build -o .\artifacts\packages
 ```
 
@@ -34,6 +59,8 @@ dotnet add package DdsAmbassador.DDSClient --version 0.1.0
 - `Rti.ConnextDds`
 - `Rti.ConnextDds.Native`
 - RTI 패키지가 요구하는 transitive dependency
+
+패키지를 다른 PC나 CI에서 restore하려면 `DdsAmbassador.DDSClient.0.1.0.nupkg`만 복사해서는 부족합니다. 소비 프로젝트의 NuGet source에는 이 패키지와 RTI 의존 패키지가 모두 있어야 합니다. 현재 저장소의 `NuGet.config`는 재현 가능한 내부 빌드를 위해 public feed를 지우고 로컬 feed만 사용하므로, 사내 feed를 쓰는 경우 소비 프로젝트에도 같은 source 정책을 맞춥니다.
 
 ## 기본 파일 배치
 
@@ -176,6 +203,13 @@ definitions/dds_client.asap.xml           Kubernetes ASAP discovery relay 설정
 
 ## 환경변수 Override
 
+`DdsClient.Connect()`와 `DdsClient.Connect(configPath)`는
+`DdsClientOptions.Load`를 호출하므로 환경변수가 XML 값을 덮어씁니다.
+반대로 `DdsClient.Connect(options)` 또는 `new DdsClient(options)`는 전달된
+Options를 그대로 사용하며 환경변수를 다시 읽지 않습니다. 코드에서
+Options를 만들었을 때 숨은 override가 생기지 않도록 두 경로를 명확히
+분리합니다.
+
 설정 파일은 이미지 안에 포함하되, 환경마다 달라지는 값은 환경변수로 바꿀 수 있습니다.
 
 ```bash
@@ -254,25 +288,71 @@ AmbassadorProfiles::ReliableRealtime
 2. 새 메시지를 DDS topic으로 쓸 경우 `definitions/topics.xml`에 같은 이름의 `<topic>`을 추가합니다.
 3. 필요한 QoS 변경이 있으면 `definitions/qos_profiles.xml`을 수정합니다.
 4. RTI 생성 코드를 다시 만듭니다.
-5. 솔루션을 빌드하고 NuGet 패키지를 다시 만듭니다.
+5. CMake 또는 각 `.csproj`로 빌드하고 NuGet 패키지를 다시 만듭니다.
 6. 패키지 버전을 올려 사용하는 프로젝트에서 새 패키지를 참조합니다.
 7. 해당 프로젝트의 컨테이너 이미지를 다시 빌드해서 Kubernetes에 배포합니다.
 
 Windows에서 재생성:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\generate-dds.ps1 -Clean
-dotnet build .\DdsAmbassador.DDSClient.sln -c Release
-dotnet pack .\src\DdsAmbassador.DDSClient\DdsAmbassador.DDSClient.csproj -c Release --no-build -o .\artifacts\packages
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build-package.ps1 -Generate -Clean -Version 0.1.1
 ```
 
-Linux에서 재생성하려면 Linux용 `rtiddsgen`이 필요합니다.
+Linux/CMake에서 재생성:
+
+```bash
+cmake -S . -B build -DDDS_GENERATE=ON
+cmake --build build --target dds_all
+```
+
+생성 파일 갱신 여부만 빠르게 확인하려면 다음을 실행합니다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\validate-dds.ps1
+```
+
+또는 Python 검증 스크립트를 직접 실행합니다.
+
+```bash
+python3 tools/validate-dds.py
+```
+
+Linux에서 재생성하려면 Linux용 `rtiddsgen`이 필요합니다. RTI 설치본 전체를 repository에 커밋하지 말고, CI 이미지나 개발 장비에서 `PATH`, `NDDSHOME`, 또는 `rti/connext/bin/rtiddsgen`로 제공하세요.
 
 ```text
 rti/connext/bin/rtiddsgen
 ```
 
-Linux용 `rtiddsgen`이 없으면 Dockerfile은 코드 생성을 건너뛰고, 저장소에 이미 생성된 C# 파일로 빌드합니다. 메시지를 바꿨다면 생성 파일도 함께 갱신되어 있어야 합니다.
+Linux용 `rtiddsgen`이 없으면 Dockerfile은 기본적으로 실패합니다. 메시지 타입을 이미 Windows에서 재생성했고 Docker 안에서는 생성을 건너뛰려는 경우에만 명시적으로 `--build-arg SKIP_DDSGEN=true`를 사용합니다.
+
+## CMake target 요약
+
+```text
+dds_validate      DDSSim.xml, topics.xml, generated DDSSim.cs 일치성 검증
+dds_generate      rtiddsgen으로 generated C# 타입 재생성
+dds_restore       dotnet restore
+dds_restore_publish CLI publish용 restore
+dds_build         dotnet build -c Release
+dds_test          dotnet test -c Release
+dds_pack          NuGet package 생성
+dds_publish_cli   ddsclient CLI publish
+dds_all           validate, restore, build, test, pack
+```
+
+주요 CMake option:
+
+- `DDS_GENERATE`: `ON`이면 build 전에 rtiddsgen 실행
+- `DDS_CLEAN_GENERATED`: `ON`이면 생성 전 기존 generated `.cs` 삭제
+- `DDS_SKIP_TESTS`: `ON`이면 `dds_all`에서 테스트 생략
+- `DDS_RUNTIME_ID`: CLI publish RID. 기본값은 빈 값이며, portable framework-dependent publish를 만듭니다. RID별 산출물이 필요하면 `win-x64`, `linux-x64`처럼 명시합니다.
+- `DDS_PACKAGE_VERSION`: pack 시 `.csproj`를 수정하지 않고 NuGet 버전을 override
+
+기본 `dds_publish_cli` 결과는 `/app/ddsclient.dll`처럼 `dotnet`으로 실행하는 portable publish입니다. 이 방식은 Windows와 Linux에서 같은 CMake 명령으로 동작하고, 로컬 NuGet feed에 RID runtime pack을 별도로 넣지 않아도 됩니다. 단일 OS/RID용 executable layout이 필요할 때만 다음처럼 지정합니다.
+
+```bash
+cmake -S . -B build-linux -DDDS_RUNTIME_ID=linux-x64
+cmake --build build-linux --target dds_publish_cli
+```
 
 ## 컨테이너로 배포하는 프로젝트에서
 
@@ -316,8 +396,8 @@ env:
 - RTI 의존성은 `Rti.ConnextDds 7.3.1` 기준입니다. RTI runtime/license 조건은 별도로 확인해야 합니다.
 - Windows/Linux native library는 `Rti.ConnextDds.Native`가 RID별로 제공합니다.
 - 사내 private feed에는 `DdsAmbassador.DDSClient`와 RTI `.nupkg` 의존성을 함께 게시해야 합니다.
-- airgap 환경에서는 `rti/nupkg`, `third_party/nuget`, 필요한 .NET host/runtime 패키지를 로컬 feed에 모두 포함해야 합니다.
-- Windows에서 Linux용으로 cross-publish하려면 `Microsoft.NETCore.App.Host.linux-x64` 또는 `Microsoft.NETCore.App.Host.linux-arm64` 같은 host package가 로컬 feed에 있어야 할 수 있습니다.
+- airgap 환경에서 RID별 publish를 사용한다면 `rti/nupkg`, `third_party/nuget`, 필요한 .NET host/runtime package를 로컬 feed에 모두 포함해야 합니다.
+- Windows에서 Linux용으로 cross-publish하려면 `Microsoft.NETCore.App.Runtime.linux-x64`, `Microsoft.AspNetCore.App.Runtime.linux-x64`, `Microsoft.NETCore.App.Host.linux-x64` 같은 package가 로컬 feed에 있어야 할 수 있습니다. 필요하지 않다면 기본 portable publish를 사용합니다.
 - Debug 로그는 메시지 전문을 콘솔에 찍습니다. 민감 정보나 고빈도 topic에서는 로그 용량에 주의해야 합니다.
 
 확인된 native asset:

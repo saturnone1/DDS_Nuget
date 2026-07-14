@@ -18,7 +18,9 @@ internal static class DdsClientOptionsLoader
                 InitialPeers = SplitPeers(Environment.GetEnvironmentVariable("DDS_INITIAL_PEERS")),
                 TopicsXmlPath = Environment.GetEnvironmentVariable("DDS_TOPICS_XML_PATH"),
                 QosProfilesXmlPath = Environment.GetEnvironmentVariable("DDS_QOS_PROFILES_XML_PATH"),
-                DdsSimXmlPath = Environment.GetEnvironmentVariable("DDS_DDSSIM_XML_PATH")
+                DdsSimXmlPath = FirstNonEmpty(
+                    Environment.GetEnvironmentVariable("DDS_DDSSIM_XML_PATH"),
+                    Environment.GetEnvironmentVariable("DDS_SIM_XML_PATH"))
             };
         }
 
@@ -60,6 +62,7 @@ internal static class DdsClientOptionsLoader
             DdsSimXmlPath = ResolvePath(
                 FirstNonEmpty(
                     Environment.GetEnvironmentVariable("DDS_DDSSIM_XML_PATH"),
+                    Environment.GetEnvironmentVariable("DDS_SIM_XML_PATH"),
                     ReadOptionalString(root, "dds_sim_xml_path")),
                 baseDirectory)
         };
@@ -241,14 +244,14 @@ internal static class DdsClientOptionsLoader
 
     private static IEnumerable<string> EnumerateBaseDirectories()
     {
-        yield return Environment.CurrentDirectory;
-        yield return AppContext.BaseDirectory;
-
-        var directory = AppContext.BaseDirectory;
-        while (directory is not null)
+        foreach (var start in new[] { Environment.CurrentDirectory, AppContext.BaseDirectory })
         {
-            yield return directory;
-            directory = Directory.GetParent(directory)?.FullName;
+            var directory = start;
+            while (directory is not null)
+            {
+                yield return directory;
+                directory = Directory.GetParent(directory)?.FullName;
+            }
         }
     }
 
