@@ -3,6 +3,8 @@
 이 문서는 C# NuGet 라이브러리의 설치와 공개 API 사용법을 설명합니다.
 C++에서 같은 기능을 사용하는 방법은
 [DDSCPP 라이브러리 사용법](../../DDSCPP/docs/library-usage.md)을 참고합니다.
+각 XML의 역할과 `dds_client.xml` 프리셋 선택 방법은
+[XML 설정 안내서](configuration.md)를 참고합니다.
 
 ## 설치
 
@@ -16,6 +18,11 @@ dotnet add package DdsAmbassador.DDSClient --version 0.1.0 --source <NuGet-feed>
 필요합니다. 패키지의 `definitions` 파일은 build/publish 출력으로 복사됩니다.
 
 ## 빠른 시작
+
+아래 예제는 실제 RTI DDS 통신을 위해
+`dds_client.rti-multicast.xml`을 명시합니다. 인자 없이 `Connect()`를 호출하면
+현재 기본 `dds_client.xml`의 `InMemory` transport가 선택되어 다른 프로세스와
+통신하지 않습니다.
 
 ```csharp
 using DdsAmbassador.DDSClient;

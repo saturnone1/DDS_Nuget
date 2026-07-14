@@ -64,6 +64,10 @@ dotnet add package DdsAmbassador.DDSClient --version 0.1.0
 
 ## 기본 파일 배치
 
+XML 파일의 역할, 세 가지 `dds_client` 프리셋의 차이, 선택 우선순위와
+문제 해결 절차는 [XML 설정 안내서](configuration.md)에 자세히 설명되어 있습니다.
+처음 사용하는 개발자는 이 안내서를 먼저 읽는 것을 권장합니다.
+
 패키지에는 기본 설정 파일이 contentFiles로 포함됩니다. 소비 프로젝트를 build/publish하면 output 아래에 `definitions` 폴더가 복사됩니다.
 
 ```text
@@ -164,6 +168,9 @@ using var subscription = client.Subscribe(
 ## 설정 파일
 
 `dds_client.xml` 계열 파일은 런타임 연결 방식을 정합니다.
+세 파일은 동시에 적용되는 설정 조각이 아니라, 실행할 때 하나만 선택하는
+완전한 연결 설정입니다. 현재 기본 `dds_client.xml`은 `InMemory`이므로
+인자 없는 `Connect()`는 실제 네트워크 DDS에 연결하지 않습니다.
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
