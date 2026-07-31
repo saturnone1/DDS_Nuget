@@ -62,6 +62,30 @@ function Find-RtiDdsGen([string] $RtiHomeValue) {
     throw "Could not find rtiddsgen. Put RTI Connext under rti/, set NDDSHOME, pass -RtiHome, or add rtiddsgen to PATH."
 }
 
+function Find-RtiSchemaDirectory([string] $GeneratorPath, [string] $RtiHomeValue) {
+    $homes = [System.Collections.Generic.List[string]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($RtiHomeValue)) {
+        $homes.Add($RtiHomeValue)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:NDDSHOME)) {
+        $homes.Add($env:NDDSHOME)
+    }
+
+    $generatorHome = Split-Path -Parent (Split-Path -Parent $GeneratorPath)
+    if (-not [string]::IsNullOrWhiteSpace($generatorHome)) {
+        $homes.Add($generatorHome)
+    }
+
+    foreach ($rtiCandidateHome in $homes) {
+        $schemaDirectory = Join-Path ([System.IO.Path]::GetFullPath($rtiCandidateHome)) 'resource/schema'
+        if (Test-Path -LiteralPath (Join-Path $schemaDirectory 'rti_dds_profiles.xsd') -PathType Leaf) {
+            return $schemaDirectory
+        }
+    }
+
+    throw "Could not find RTI schema directory containing rti_dds_profiles.xsd for generator: $GeneratorPath"
+}
+
 $XmlPath = Resolve-FullPath $XmlPath
 $OutputDir = Resolve-FullPath $OutputDir
 
@@ -70,24 +94,65 @@ if (-not (Test-Path $XmlPath)) {
 }
 
 New-Item -ItemType Directory -Force $OutputDir | Out-Null
+$rtiddsgen = Find-RtiDdsGen $RtiHome
+$schemaDirectory = Find-RtiSchemaDirectory $rtiddsgen $RtiHome
+$outputParent = Split-Path -Parent $OutputDir
+$workId = [guid]::NewGuid().ToString('N')
+$candidateDirectory = Join-Path $outputParent ".ddsgen-candidate-$workId"
+$backupDirectory = Join-Path $outputParent ".ddsgen-backup-$workId"
+
+New-Item -ItemType Directory -Path $candidateDirectory | Out-Null
+Get-ChildItem -LiteralPath $OutputDir -Force -ErrorAction SilentlyContinue |
+    Copy-Item -Destination $candidateDirectory -Recurse -Force
 
 if ($Clean) {
-    Get-ChildItem $OutputDir -Filter '*.cs' -File -ErrorAction SilentlyContinue |
+    Get-ChildItem -LiteralPath $candidateDirectory -Filter '*.cs' -File -ErrorAction SilentlyContinue |
         Remove-Item -Force
 }
 
-$rtiddsgen = Find-RtiDdsGen $RtiHome
 $arguments = @(
     '-language', 'c#',
     '-inputXml',
     '-update', 'typefiles',
-    '-d', $OutputDir,
+    '-d', $candidateDirectory,
     $XmlPath
 )
 
-Write-Host "Running $rtiddsgen $($arguments -join ' ')"
-& $rtiddsgen @arguments
+try {
+    Write-Host "Running $rtiddsgen $($arguments -join ' ')"
+    Push-Location $schemaDirectory
+    try {
+        & $rtiddsgen @arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "rtiddsgen failed with exit code $LASTEXITCODE."
+        }
+    }
+    finally {
+        Pop-Location
+    }
 
-if ($LASTEXITCODE -ne 0) {
-    throw "rtiddsgen failed with exit code $LASTEXITCODE."
+    $generatedFiles = Get-ChildItem -LiteralPath $candidateDirectory -Filter '*.cs' -File
+    if ($generatedFiles.Count -eq 0) {
+        throw 'rtiddsgen completed without producing any C# files.'
+    }
+
+    Move-Item -LiteralPath $OutputDir -Destination $backupDirectory
+    try {
+        Move-Item -LiteralPath $candidateDirectory -Destination $OutputDir
+    }
+    catch {
+        if (Test-Path -LiteralPath $backupDirectory) {
+            Move-Item -LiteralPath $backupDirectory -Destination $OutputDir
+        }
+        throw
+    }
+
+    Remove-Item -LiteralPath $backupDirectory -Recurse -Force
+}
+finally {
+    foreach ($temporaryDirectory in @($candidateDirectory, $backupDirectory)) {
+        if (Test-Path -LiteralPath $temporaryDirectory) {
+            Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }

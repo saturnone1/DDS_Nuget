@@ -103,6 +103,56 @@ public sealed class DdsClientTests
     }
 
     [Fact]
+    public void ExplicitTopicRejectsDifferentGeneratedSampleType()
+    {
+        using var client = new DdsClient(CreateOptions());
+
+        var exception = Assert.Throws<DdsOperationException>(() =>
+            client.Publish("TimeTickInformation", new WeaponFire()));
+
+        Assert.Contains("TimeTickInformation", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("WeaponFire", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConfigurationLoaderRequiresAmbassadorProfilesLibrary()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var qosPath = Path.Combine(tempDirectory.Path, "qos_profiles.xml");
+        File.WriteAllText(
+            qosPath,
+            """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <dds><qos_library name="WrongLibrary">
+              <qos_profile name="ReliableRealtime" />
+            </qos_library></dds>
+            """);
+
+        var exception = Assert.Throws<DdsConfigurationException>(() =>
+            DdsConfigurationLoader.Load(
+                DefinitionsPath("topics.xml"), qosPath, DefinitionsPath("DDSSim.xml")));
+
+        Assert.Contains("AmbassadorProfiles", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConfigurationFilesRejectUnexpectedRootElements()
+    {
+        using var tempDirectory = new TemporaryDirectory();
+        var topicsPath = Path.Combine(tempDirectory.Path, "topics.xml");
+        File.WriteAllText(
+            topicsPath,
+            "<wrong><topic name=\"TimeTickInformation\" qos_profile=\"ReliableRealtime\" direction=\"Both\" /></wrong>");
+        Assert.Throws<DdsConfigurationException>(() =>
+            DdsConfigurationLoader.Load(
+                topicsPath, DefinitionsPath("qos_profiles.xml"), DefinitionsPath("DDSSim.xml")));
+
+        var configPath = Path.Combine(tempDirectory.Path, "dds_client.xml");
+        File.WriteAllText(configPath, "<wrong><transport>InMemory</transport></wrong>");
+        Assert.Throws<DdsConfigurationException>(() => DdsClientOptions.Load(configPath));
+    }
+
+    [Fact]
     public void ExplicitDefinitionPathsOverrideEnvironment()
     {
         WithDefinitionEnvironment("missing-topics.xml", "missing-qos.xml", "missing-sim.xml", () =>

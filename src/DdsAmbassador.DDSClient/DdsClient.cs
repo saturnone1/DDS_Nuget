@@ -91,6 +91,7 @@ public sealed class DdsClient : IDisposable
         ArgumentNullException.ThrowIfNull(sample);
 
         var topic = Configuration.GetTopic(topicName);
+        EnsureTopicMatchesSampleType(topic, sample.GetType());
         EnsureCanPublish(topic);
         LogSend(topic, sample);
         _transport.Publish(topic, sample.GetType(), sample);
@@ -103,6 +104,7 @@ public sealed class DdsClient : IDisposable
         ArgumentNullException.ThrowIfNull(handler);
 
         var topic = Configuration.GetTopic(topicName);
+        EnsureTopicMatchesSampleType(topic, sampleType);
         EnsureCanSubscribe(topic);
         return _transport.Subscribe(topic, sampleType, sample =>
         {
@@ -147,6 +149,15 @@ public sealed class DdsClient : IDisposable
         if (topic.Direction == TopicDirection.Publish)
         {
             throw new DdsOperationException($"Topic '{topic.Name}' is configured as Publish and cannot subscribe.");
+        }
+    }
+
+    private static void EnsureTopicMatchesSampleType(TopicDefinition topic, Type sampleType)
+    {
+        if (!topic.Name.Equals(sampleType.Name, StringComparison.Ordinal))
+        {
+            throw new DdsOperationException(
+                $"Topic '{topic.Name}' requires sample type '{topic.Name}', but '{sampleType.FullName}' was provided.");
         }
     }
 
