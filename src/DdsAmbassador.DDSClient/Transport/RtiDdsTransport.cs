@@ -781,7 +781,13 @@ public sealed class RtiDdsTransport : IDdsTransport
             {
                 try
                 {
-                    foreach (var condition in _waitSet.Wait(WaitPollInterval))
+                    var triggered = WaitForConditions();
+                    if (triggered is null)
+                    {
+                        continue;
+                    }
+
+                    foreach (var condition in triggered)
                     {
                         if (ReferenceEquals(condition, _shutdownCondition))
                         {
@@ -793,12 +799,6 @@ public sealed class RtiDdsTransport : IDdsTransport
                             ProcessData();
                         }
                     }
-                }
-                catch (TimeoutException)
-                {
-                    // No condition fired within the poll interval. Looping re-reads the
-                    // shutdown flag, so a trigger this thread never observed cannot leave
-                    // it parked in nddscore's condition wait for the life of the process.
                 }
                 catch (ObjectDisposedException) when (_disposed != 0)
                 {
@@ -816,6 +816,29 @@ public sealed class RtiDdsTransport : IDdsTransport
                         ex);
                     return;
                 }
+            }
+        }
+
+        /// <summary>
+        /// Waits for the next triggered condition, bounded by the poll interval so a
+        /// shutdown trigger this thread never observed cannot leave it parked in
+        /// nddscore's condition wait for the life of the process.
+        /// </summary>
+        /// <returns>
+        /// The triggered conditions, or <see langword="null"/> when the poll interval
+        /// expired with nothing triggered. The timeout is caught here and nowhere wider,
+        /// so a TimeoutException raised by a handler - a reliable writer hitting
+        /// max_blocking_time, say - is still reported rather than mistaken for an idle poll.
+        /// </returns>
+        private IEnumerable<Condition>? WaitForConditions()
+        {
+            try
+            {
+                return _waitSet.Wait(WaitPollInterval).ToArray();
+            }
+            catch (TimeoutException)
+            {
+                return null;
             }
         }
 
