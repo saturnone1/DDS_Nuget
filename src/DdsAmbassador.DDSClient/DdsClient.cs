@@ -121,6 +121,16 @@ public sealed class DdsClient : IDisposable
         }
 
         _transport.Dispose();
+
+        // When Dispose runs on a DDS dispatch thread the transport tears itself down on
+        // a separate thread. Wait for it here so the DomainParticipant - and the ports
+        // it owns - are released before the host finishes shutting down.
+        if (_transport is RtiDdsTransport rtiTransport && !rtiTransport.WaitForDisposeCompletion())
+        {
+            DdsClientLog.Error(
+                Options,
+                "DDS transport shutdown did not complete in time. DDS ports may stay bound until this process exits.");
+        }
     }
 
     private TopicDefinition ResolveTopic(Type sampleType)

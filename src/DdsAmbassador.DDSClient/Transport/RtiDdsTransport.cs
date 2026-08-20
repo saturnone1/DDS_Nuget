@@ -13,6 +13,21 @@ namespace DdsAmbassador.DDSClient.Transport;
 
 public sealed class RtiDdsTransport : IDdsTransport
 {
+    /// <summary>
+    /// Upper bound for a single shutdown step (worker join, participant deletion).
+    /// Override with DDS_SHUTDOWN_TIMEOUT_MS.
+    /// </summary>
+    private static readonly TimeSpan DefaultShutdownTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// The dispatch loop re-checks its shutdown flag at this interval so a missed
+    /// GuardCondition trigger cannot pin an RTI worker thread forever.
+    /// </summary>
+    private static readonly Omg.Dds.Core.Duration WaitPollInterval =
+        Omg.Dds.Core.Duration.FromMilliseconds(500);
+
+    private static int _liveTransportCount;
+
     private readonly object _gate = new();
     private readonly DdsClientOptions _options;
     private readonly DomainParticipant _participant;
@@ -22,6 +37,8 @@ public sealed class RtiDdsTransport : IDdsTransport
     private readonly Dictionary<TopicKey, object> _topics = [];
     private readonly Dictionary<TopicKey, IRtiWriter> _writers = [];
     private readonly List<IDisposable> _subscriptions = [];
+    private readonly ManualResetEventSlim _disposeCompleted = new();
+    private IWorkerSubscription[] _disposingSubscriptions = [];
     private string? _temporaryQosProfilesXmlPath;
     private int _disposed;
 
@@ -105,10 +122,13 @@ public sealed class RtiDdsTransport : IDdsTransport
             _participant = participant;
             _publisher = publisher;
             _subscriber = subscriber;
+            Interlocked.Increment(ref _liveTransportCount);
         }
         catch
         {
-            DisposeIgnoringErrors(participant);
+            // A participant that survives a failed construction keeps its RTI
+            // worker threads and its discovery sockets, so tear it down fully.
+            DisposeParticipantIgnoringErrors(participant);
             DisposeIgnoringErrors(qosProvider);
             DeleteTemporaryQosProfilesXml();
             throw;
@@ -177,38 +197,67 @@ public sealed class RtiDdsTransport : IDdsTransport
             _subscriptions.Clear();
         }
 
-        var calledFromWorker = subscriptions
-            .OfType<IWorkerSubscription>()
-            .Any(subscription => subscription.IsCurrentWorkerThread);
+        var workers = subscriptions.OfType<IWorkerSubscription>().ToArray();
+        _disposingSubscriptions = workers;
 
-        if (calledFromWorker)
+        // Stop every dispatch loop first: the participant cannot be deleted while
+        // its readers are still in use, and an unstopped loop keeps RTI's internal
+        // threads (and the discovery sockets they own) alive after Dispose returns.
+        foreach (var worker in workers)
         {
-            foreach (var subscription in subscriptions.OfType<IWorkerSubscription>())
-            {
-                subscription.RequestStop();
-            }
+            worker.RequestStop();
+        }
 
-            ThreadPool.QueueUserWorkItem(_ =>
+        if (workers.Any(worker => worker.IsCurrentWorkerThread))
+        {
+            // Dispose was called from a dispatch loop, which must return before it
+            // can be joined. Hand the teardown to another thread; callers observe
+            // its completion through WaitForDisposeCompletion.
+            var cleanupThread = new Thread(() =>
             {
                 try
                 {
-                    CompleteDispose(subscriptions);
+                    CompleteDispose(workers);
                 }
-                catch (Exception ex)
+                catch (Exception)
                 {
-                    DdsClientLog.Error(_options, "Asynchronous RTI transport cleanup failed.", ex);
+                    // Already logged by CompleteDispose. Letting it escape a bare thread
+                    // would take the process down during an orderly shutdown.
                 }
-            });
+            })
+            {
+                IsBackground = true,
+                Name = "dds-transport-shutdown"
+            };
+            cleanupThread.Start();
             return;
         }
 
-        foreach (var subscription in subscriptions)
+        CompleteDispose(workers);
+    }
+
+    /// <summary>
+    /// Blocks until the teardown started by <see cref="Dispose"/> has finished, so a
+    /// host can be sure the DomainParticipant (and the ports it owns) is gone before
+    /// the process exits.
+    /// </summary>
+    /// <returns>
+    /// <see langword="false"/> only when teardown was still running at <paramref name="timeout"/>.
+    /// Returns <see langword="true"/> when called from a dispatch loop that teardown is
+    /// itself waiting on: that thread cannot wait for its own exit, and blocking there
+    /// would deadlock shutdown rather than confirm it.
+    /// </returns>
+    public bool WaitForDisposeCompletion(TimeSpan timeout)
+    {
+        if (_disposingSubscriptions.Any(subscription => subscription.IsCurrentWorkerThread))
         {
-            subscription.Dispose();
+            return true;
         }
 
-        CompleteDispose(subscriptions);
+        return _disposeCompleted.Wait(timeout);
     }
+
+    public bool WaitForDisposeCompletion() => WaitForDisposeCompletion(ResolveShutdownTimeout());
 
     private object GetOrCreateTopic(TopicDefinition topic, Type sampleType)
     {
@@ -390,7 +439,9 @@ public sealed class RtiDdsTransport : IDdsTransport
 
         void RequestStop();
 
-        void WaitForShutdown();
+        /// <returns><see langword="true"/> when the dispatch loop stopped and its
+        /// DDS entities were released.</returns>
+        bool WaitForShutdown(TimeSpan timeout);
     }
 
     private sealed class RtiWriter<T>(DdsClientOptions options, DataWriter<T> writer) : IRtiWriter
@@ -414,24 +465,141 @@ public sealed class RtiDdsTransport : IDdsTransport
         }
     }
 
-    private void CompleteDispose(IEnumerable<IDisposable> subscriptions)
+    private void CompleteDispose(IEnumerable<IWorkerSubscription> subscriptions)
     {
         Exception? firstFailure = null;
-        foreach (var subscription in subscriptions.OfType<IWorkerSubscription>())
-        {
-            CaptureCleanupFailure(subscription.WaitForShutdown, ref firstFailure);
-        }
+        var timeout = ResolveShutdownTimeout();
+        var allWorkersStopped = true;
 
-        CaptureCleanupFailure(_participant.Dispose, ref firstFailure);
-        if (_qosProvider is not null)
+        try
         {
-            CaptureCleanupFailure(_qosProvider.Dispose, ref firstFailure);
+            foreach (var subscription in subscriptions)
+            {
+                var stopped = false;
+                CaptureCleanupFailure(() => stopped = subscription.WaitForShutdown(timeout), ref firstFailure);
+                allWorkersStopped &= stopped;
+            }
+
+            if (allWorkersStopped)
+            {
+                CaptureCleanupFailure(DisposeParticipant, ref firstFailure);
+            }
+            else
+            {
+                // A dispatch loop is wedged and may still be inside the reader. Deleting
+                // the participant underneath it would fault in native code, so leak it
+                // deliberately and let process exit reclaim the ports.
+                DdsClientLog.Error(
+                    _options,
+                    $"One or more DDS dispatch loops did not stop within {timeout}. " +
+                    "The DomainParticipant was left undeleted to avoid tearing down entities still in use.");
+            }
+
+            if (_qosProvider is not null)
+            {
+                CaptureCleanupFailure(_qosProvider.Dispose, ref firstFailure);
+            }
+            DeleteTemporaryQosProfilesXml();
         }
-        DeleteTemporaryQosProfilesXml();
+        finally
+        {
+            // Always publish completion; a caller waiting on shutdown must never be
+            // stranded because a cleanup step threw.
+            _disposeCompleted.Set();
+        }
 
         if (firstFailure is not null)
         {
+            DdsClientLog.Error(_options, "RTI transport cleanup reported a failure.", firstFailure);
             ExceptionDispatchInfo.Capture(firstFailure).Throw();
+        }
+    }
+
+    private void DisposeParticipant()
+    {
+        lock (_gate)
+        {
+            _writers.Clear();
+            _topics.Clear();
+        }
+
+        // Delete writers, topics, the publisher and the subscriber before the
+        // participant itself: a participant that still contains entities fails
+        // deletion with PreconditionNotMet and keeps its RTI threads running.
+        _participant.DisposeContainedEntities();
+        _participant.Dispose();
+
+        ReleaseFactoryIfLastTransport();
+    }
+
+    /// <summary>
+    /// Releases the middleware-global resources held by the DomainParticipantFactory
+    /// once the last transport in this process is gone. Skipped when
+    /// DDS_FINALIZE_FACTORY is set to 0/false.
+    /// </summary>
+    private void ReleaseFactoryIfLastTransport()
+    {
+        if (Interlocked.Decrement(ref _liveTransportCount) != 0)
+        {
+            return;
+        }
+
+        var setting = NormalizeEnvironmentValue("DDS_FINALIZE_FACTORY");
+        if (setting is not null &&
+            (setting.Equals("0", StringComparison.Ordinal) ||
+             setting.Equals("false", StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        try
+        {
+            DomainParticipantFactory.Instance.Dispose();
+        }
+        catch (Exception ex)
+        {
+            // Best-effort: the participant is already gone, which is what releases
+            // the ports. A new Instance call starts a fresh factory lifecycle.
+            DdsClientLog.Error(_options, "Finalizing the DomainParticipantFactory failed.", ex);
+        }
+    }
+
+    private static TimeSpan ResolveShutdownTimeout()
+    {
+        var value = NormalizeEnvironmentValue("DDS_SHUTDOWN_TIMEOUT_MS");
+        if (value is not null &&
+            int.TryParse(value, out var milliseconds) &&
+            milliseconds > 0)
+        {
+            return TimeSpan.FromMilliseconds(milliseconds);
+        }
+
+        return DefaultShutdownTimeout;
+    }
+
+    private void DisposeParticipantIgnoringErrors(DomainParticipant? participant)
+    {
+        if (participant is null)
+        {
+            return;
+        }
+
+        try
+        {
+            participant.DisposeContainedEntities();
+        }
+        catch (Exception ex)
+        {
+            DdsClientLog.Error(_options, "Deleting contained DDS entities failed.", ex);
+        }
+
+        try
+        {
+            participant.Dispose();
+        }
+        catch (Exception ex)
+        {
+            DdsClientLog.Error(_options, "Deleting the DomainParticipant failed.", ex);
         }
     }
 
@@ -540,7 +708,7 @@ public sealed class RtiDdsTransport : IDdsTransport
                 {
                     try
                     {
-                        WaitForShutdown();
+                        WaitForShutdown(ResolveShutdownTimeout());
                     }
                     catch (Exception ex)
                     {
@@ -550,7 +718,7 @@ public sealed class RtiDdsTransport : IDdsTransport
                 return;
             }
 
-            WaitForShutdown();
+            WaitForShutdown(ResolveShutdownTimeout());
         }
 
         public bool IsCurrentWorkerThread => Thread.CurrentThread == _worker;
@@ -563,14 +731,22 @@ public sealed class RtiDdsTransport : IDdsTransport
             }
         }
 
-        public void WaitForShutdown()
+        public bool WaitForShutdown(TimeSpan timeout)
         {
             if (IsCurrentWorkerThread)
             {
-                return;
+                return false;
             }
 
-            _worker.Join();
+            if (!_worker.Join(timeout))
+            {
+                DdsClientLog.Error(
+                    _options,
+                    $"DDS dispatch loop for type '{typeof(T).FullName}' did not stop within {timeout}. " +
+                    "Its reader and WaitSet were left undisposed.");
+                return false;
+            }
+
             if (Interlocked.CompareExchange(ref _cleanupStarted, 1, 0) != 0)
             {
                 _cleanupFinished.Wait();
@@ -578,7 +754,7 @@ public sealed class RtiDdsTransport : IDdsTransport
                 {
                     ExceptionDispatchInfo.Capture(_cleanupFailure).Throw();
                 }
-                return;
+                return true;
             }
 
             Exception? firstFailure = null;
@@ -595,15 +771,17 @@ public sealed class RtiDdsTransport : IDdsTransport
             {
                 ExceptionDispatchInfo.Capture(firstFailure).Throw();
             }
+
+            return true;
         }
 
         private void DispatchLoop()
         {
-            while (_disposed == 0)
+            while (Volatile.Read(ref _disposed) == 0)
             {
                 try
                 {
-                    foreach (var condition in _waitSet.Wait())
+                    foreach (var condition in _waitSet.Wait(WaitPollInterval))
                     {
                         if (ReferenceEquals(condition, _shutdownCondition))
                         {
@@ -615,6 +793,12 @@ public sealed class RtiDdsTransport : IDdsTransport
                             ProcessData();
                         }
                     }
+                }
+                catch (TimeoutException)
+                {
+                    // No condition fired within the poll interval. Looping re-reads the
+                    // shutdown flag, so a trigger this thread never observed cannot leave
+                    // it parked in nddscore's condition wait for the life of the process.
                 }
                 catch (ObjectDisposedException) when (_disposed != 0)
                 {
