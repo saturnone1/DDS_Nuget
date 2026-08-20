@@ -124,8 +124,9 @@ public sealed class DdsClient : IDisposable
 
         // When Dispose runs on a DDS dispatch thread the transport tears itself down on
         // a separate thread. Wait for it here so the DomainParticipant - and the ports
-        // it owns - are released before the host finishes shutting down.
-        if (_transport is RtiDdsTransport rtiTransport && !rtiTransport.WaitForDisposeCompletion())
+        // it owns - are released before the host finishes shutting down. Asking through
+        // the interface keeps this working for a transport that wraps another one.
+        if (!_transport.WaitForDisposeCompletion(DdsClientOptionResolver.ResolveShutdownTimeout()))
         {
             DdsClientLog.Error(
                 Options,
@@ -178,6 +179,14 @@ public sealed class DdsClient : IDisposable
 
     private void LogSend(TopicDefinition topic, object sample)
     {
+        // Guard before interpolating: {sample} calls ToString(), which for an
+        // rtiddsgen type routes into RTI's native type support and serializes every
+        // field - on every publish, at every log level.
+        if (!DdsClientLog.IsEnabled(Options, DdsLogLevel.Debug))
+        {
+            return;
+        }
+
         DdsClientLog.Debug(
             Options,
             $"TX topic={topic.Name}, type={sample.GetType().FullName}{Environment.NewLine}{sample}");
@@ -185,6 +194,11 @@ public sealed class DdsClient : IDisposable
 
     private void LogReceive(TopicDefinition topic, object sample)
     {
+        if (!DdsClientLog.IsEnabled(Options, DdsLogLevel.Debug))
+        {
+            return;
+        }
+
         DdsClientLog.Debug(
             Options,
             $"RX topic={topic.Name}, type={sample.GetType().FullName}{Environment.NewLine}{sample}");

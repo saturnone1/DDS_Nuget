@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
@@ -13,12 +14,6 @@ namespace DdsAmbassador.DDSClient.Transport;
 
 public sealed class RtiDdsTransport : IDdsTransport
 {
-    /// <summary>
-    /// Upper bound for a single shutdown step (worker join, participant deletion).
-    /// Override with DDS_SHUTDOWN_TIMEOUT_MS.
-    /// </summary>
-    private static readonly TimeSpan DefaultShutdownTimeout = TimeSpan.FromSeconds(10);
-
     /// <summary>
     /// The dispatch loop re-checks its shutdown flag at this interval so a missed
     /// GuardCondition trigger cannot pin an RTI worker thread forever.
@@ -38,6 +33,7 @@ public sealed class RtiDdsTransport : IDdsTransport
     private readonly Dictionary<TopicKey, IRtiWriter> _writers = [];
     private readonly List<IDisposable> _subscriptions = [];
     private readonly ManualResetEventSlim _disposeCompleted = new();
+    private int _publishesInFlight;
     private IWorkerSubscription[] _disposingSubscriptions = [];
     private string? _temporaryQosProfilesXmlPath;
     private int _disposed;
@@ -164,7 +160,7 @@ public sealed class RtiDdsTransport : IDdsTransport
                 topic,
                 handler);
             _subscriptions.Add(subscription);
-            return new SubscriptionHandle(subscription);
+            return new SubscriptionHandle(this, subscription);
         }
     }
 
@@ -175,12 +171,52 @@ public sealed class RtiDdsTransport : IDdsTransport
         ArgumentNullException.ThrowIfNull(sample);
 
         EnsureTopicMatchesSampleType(topic, sampleType);
+
+        IRtiWriter writer;
         lock (_gate)
         {
             ThrowIfDisposed();
-            var writer = GetOrCreateWriter(topic, sampleType);
+            writer = GetOrCreateWriter(topic, sampleType);
+
+            // Counted inside the same lock section as the disposed check, so once
+            // Dispose has set the flag no further publish can register and the count
+            // only falls. That is what makes the drain below terminate.
+            Interlocked.Increment(ref _publishesInFlight);
+        }
+
+        try
+        {
+            // Deliberately outside the lock. The only shipped QoS profile is RELIABLE
+            // with KEEP_ALL history, so a slow subscriber's backpressure blocks this
+            // call - and holding _gate across it meant one stalled reader could block
+            // Dispose, which also takes _gate.
             writer.Write(sample);
         }
+        finally
+        {
+            Interlocked.Decrement(ref _publishesInFlight);
+        }
+    }
+
+    /// <summary>
+    /// Waits for publishes that are already past the disposed check to finish, so the
+    /// participant is not deleted while a write is still inside RTI.
+    /// </summary>
+    /// <returns><see langword="false"/> if publishes were still in flight at the timeout.</returns>
+    private bool DrainPublishes(TimeSpan timeout)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (Volatile.Read(ref _publishesInFlight) > 0)
+        {
+            if (elapsed.Elapsed >= timeout)
+            {
+                return false;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        return true;
     }
 
     public void Dispose()
@@ -257,7 +293,32 @@ public sealed class RtiDdsTransport : IDdsTransport
         return _disposeCompleted.Wait(timeout);
     }
 
-    public bool WaitForDisposeCompletion() => WaitForDisposeCompletion(ResolveShutdownTimeout());
+    public bool WaitForDisposeCompletion() => WaitForDisposeCompletion(DdsClientOptionResolver.ResolveShutdownTimeout());
+
+    /// <summary>
+    /// Drops a subscription the caller has disposed. Without this the list only ever
+    /// grew, so a service that subscribes and unsubscribes over its lifetime kept every
+    /// dead subscription alive until the transport itself went away.
+    /// </summary>
+    private void ForgetSubscription(IDisposable subscription)
+    {
+        lock (_gate)
+        {
+            _subscriptions.Remove(subscription);
+        }
+    }
+
+    /// <summary>Subscriptions still tracked for shutdown. For tests.</summary>
+    internal int TrackedSubscriptionCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _subscriptions.Count;
+            }
+        }
+    }
 
     private object GetOrCreateTopic(TopicDefinition topic, Type sampleType)
     {
@@ -364,8 +425,8 @@ public sealed class RtiDdsTransport : IDdsTransport
 
     private static string? ResolveMulticastAddressOverride()
     {
-        var general = NormalizeEnvironmentValue("DDS_MULTICAST_ADDRESS");
-        var receive = NormalizeEnvironmentValue("DDS_MULTICAST_RECEIVE_ADDRESS");
+        var general = DdsClientOptionResolver.NormalizeEnvironmentValue("DDS_MULTICAST_ADDRESS");
+        var receive = DdsClientOptionResolver.NormalizeEnvironmentValue("DDS_MULTICAST_RECEIVE_ADDRESS");
 
         var selected = FirstNonEmpty(receive, general);
         if (selected is null)
@@ -381,12 +442,6 @@ public sealed class RtiDdsTransport : IDdsTransport
 
         ValidateMulticastAddress(selected);
         return selected;
-    }
-
-    private static string? NormalizeEnvironmentValue(string name)
-    {
-        var value = Environment.GetEnvironmentVariable(name);
-        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
     private static string? FirstNonEmpty(params string?[] values)
@@ -448,10 +503,16 @@ public sealed class RtiDdsTransport : IDdsTransport
     {
         public void Write(object sample)
         {
-            DdsClientLog.Debug(
-                options,
-                $"Writer<{typeof(T).FullName}> matched={writer.PublicationMatchedStatus.CurrentCount}, " +
-                $"incompatibleQos={writer.OfferedIncompatibleQosStatus.TotalCount.Value}");
+            // Both status properties are native calls. Reading them unconditionally cost
+            // every publish two round trips into RTI even with logging switched off.
+            if (DdsClientLog.IsEnabled(options, DdsLogLevel.Debug))
+            {
+                DdsClientLog.Debug(
+                    options,
+                    $"Writer<{typeof(T).FullName}> matched={writer.PublicationMatchedStatus.CurrentCount}, " +
+                    $"incompatibleQos={writer.OfferedIncompatibleQosStatus.TotalCount.Value}");
+            }
+
             writer.Write((T)sample);
         }
     }
@@ -468,7 +529,7 @@ public sealed class RtiDdsTransport : IDdsTransport
     private void CompleteDispose(IEnumerable<IWorkerSubscription> subscriptions)
     {
         Exception? firstFailure = null;
-        var timeout = ResolveShutdownTimeout();
+        var timeout = DdsClientOptionResolver.ResolveShutdownTimeout();
         var allWorkersStopped = true;
 
         try
@@ -480,18 +541,28 @@ public sealed class RtiDdsTransport : IDdsTransport
                 allWorkersStopped &= stopped;
             }
 
-            if (allWorkersStopped)
+            // After the dispatch loops, because a handler can publish: stopping them
+            // first means fewer publishes are still in flight to wait for.
+            var publishesDrained = DrainPublishes(timeout);
+
+            if (allWorkersStopped && publishesDrained)
             {
                 CaptureCleanupFailure(DisposeParticipant, ref firstFailure);
             }
             else
             {
-                // A dispatch loop is wedged and may still be inside the reader. Deleting
-                // the participant underneath it would fault in native code, so leak it
-                // deliberately and let process exit reclaim the ports.
+                // Something is still inside RTI - a wedged dispatch loop holding the
+                // reader, or a publish blocked on backpressure. Deleting the participant
+                // underneath it would fault in native code, so leak it deliberately and
+                // let process exit reclaim the ports.
+                var stalled = !allWorkersStopped && !publishesDrained
+                    ? "One or more DDS dispatch loops and at least one publish"
+                    : !allWorkersStopped
+                        ? "One or more DDS dispatch loops"
+                        : "At least one publish";
                 DdsClientLog.Error(
                     _options,
-                    $"One or more DDS dispatch loops did not stop within {timeout}. " +
+                    $"{stalled} did not finish within {timeout}. " +
                     "The DomainParticipant was left undeleted to avoid tearing down entities still in use.");
             }
 
@@ -544,7 +615,7 @@ public sealed class RtiDdsTransport : IDdsTransport
             return;
         }
 
-        var setting = NormalizeEnvironmentValue("DDS_FINALIZE_FACTORY");
+        var setting = DdsClientOptionResolver.NormalizeEnvironmentValue("DDS_FINALIZE_FACTORY");
         if (setting is not null &&
             (setting.Equals("0", StringComparison.Ordinal) ||
              setting.Equals("false", StringComparison.OrdinalIgnoreCase)))
@@ -562,19 +633,6 @@ public sealed class RtiDdsTransport : IDdsTransport
             // the ports. A new Instance call starts a fresh factory lifecycle.
             DdsClientLog.Error(_options, "Finalizing the DomainParticipantFactory failed.", ex);
         }
-    }
-
-    private static TimeSpan ResolveShutdownTimeout()
-    {
-        var value = NormalizeEnvironmentValue("DDS_SHUTDOWN_TIMEOUT_MS");
-        if (value is not null &&
-            int.TryParse(value, out var milliseconds) &&
-            milliseconds > 0)
-        {
-            return TimeSpan.FromMilliseconds(milliseconds);
-        }
-
-        return DefaultShutdownTimeout;
     }
 
     private void DisposeParticipantIgnoringErrors(DomainParticipant? participant)
@@ -627,7 +685,7 @@ public sealed class RtiDdsTransport : IDdsTransport
         }
     }
 
-    private sealed class SubscriptionHandle(IDisposable inner) : IDisposable
+    private sealed class SubscriptionHandle(RtiDdsTransport owner, IDisposable inner) : IDisposable
     {
         private int _disposed;
 
@@ -638,7 +696,17 @@ public sealed class RtiDdsTransport : IDdsTransport
                 return;
             }
 
-            inner.Dispose();
+            // Dispose first and deregister after: inner.Dispose joins the dispatch
+            // thread, and doing that while holding the transport's lock would stall
+            // every other caller - including Dispose itself.
+            try
+            {
+                inner.Dispose();
+            }
+            finally
+            {
+                owner.ForgetSubscription(inner);
+            }
         }
     }
 
@@ -708,7 +776,7 @@ public sealed class RtiDdsTransport : IDdsTransport
                 {
                     try
                     {
-                        WaitForShutdown(ResolveShutdownTimeout());
+                        WaitForShutdown(DdsClientOptionResolver.ResolveShutdownTimeout());
                     }
                     catch (Exception ex)
                     {
@@ -718,7 +786,7 @@ public sealed class RtiDdsTransport : IDdsTransport
                 return;
             }
 
-            WaitForShutdown(ResolveShutdownTimeout());
+            WaitForShutdown(DdsClientOptionResolver.ResolveShutdownTimeout());
         }
 
         public bool IsCurrentWorkerThread => Thread.CurrentThread == _worker;

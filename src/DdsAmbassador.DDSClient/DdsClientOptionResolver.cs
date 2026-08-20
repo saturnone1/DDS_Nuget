@@ -2,6 +2,31 @@ namespace DdsAmbassador.DDSClient;
 
 internal static class DdsClientOptionResolver
 {
+    /// <summary>
+    /// Upper bound for a single shutdown step (worker join, publish drain, participant
+    /// deletion). Override with DDS_SHUTDOWN_TIMEOUT_MS.
+    /// </summary>
+    private static readonly TimeSpan DefaultShutdownTimeout = TimeSpan.FromSeconds(10);
+
+    public static TimeSpan ResolveShutdownTimeout()
+    {
+        var value = NormalizeEnvironmentValue("DDS_SHUTDOWN_TIMEOUT_MS");
+        if (value is not null &&
+            int.TryParse(value, out var milliseconds) &&
+            milliseconds > 0)
+        {
+            return TimeSpan.FromMilliseconds(milliseconds);
+        }
+
+        return DefaultShutdownTimeout;
+    }
+
+    public static string? NormalizeEnvironmentValue(string name)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
     public static string ResolveTopicsXmlPath(DdsClientOptions options)
     {
         return ResolveRequiredFile(
