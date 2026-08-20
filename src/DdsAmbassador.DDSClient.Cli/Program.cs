@@ -9,10 +9,9 @@ if (string.IsNullOrWhiteSpace(command) || IsHelp(command))
     return command is null ? 1 : 0;
 }
 
-var options = CliOptions.Parse(args.Skip(1).ToArray());
-
 try
 {
+    var options = CliOptions.Parse(args.Skip(1).ToArray());
     switch (command.ToLowerInvariant())
     {
         case "list":
@@ -127,7 +126,7 @@ catch (OperationCanceledException)
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine(ex);
+    Console.Error.WriteLine(ex.Message);
     return 1;
 }
 
@@ -429,7 +428,11 @@ static void SetEnumIfMissingOrDefault(object target, string propertyName, string
     if (Enum.TryParse(property.PropertyType, value, ignoreCase: true, out var parsed))
     {
         property.SetValue(target, parsed);
+        return;
     }
+
+    throw new ArgumentException(
+        $"'{value}'은(는) {property.PropertyType.Name}.{propertyName}에 사용할 수 없는 enum 값입니다.");
 }
 
 static void PrintUsage()
@@ -678,9 +681,22 @@ internal sealed class CliOptions
                     intervalMs = ReadNonNegativeInt(args, ref i);
                     break;
                 default:
-                    topic ??= args[i];
+                    if (args[i].StartsWith("-", StringComparison.Ordinal))
+                    {
+                        throw new ArgumentException($"알 수 없는 옵션입니다: {args[i]}");
+                    }
+                    if (topic is not null)
+                    {
+                        throw new ArgumentException($"예상하지 않은 추가 인수입니다: {args[i]}");
+                    }
+                    topic = args[i];
                     break;
             }
+        }
+
+        if (jsonPath is not null && readStdin)
+        {
+            throw new ArgumentException("--json과 --stdin은 동시에 사용할 수 없습니다.");
         }
 
         return new CliOptions

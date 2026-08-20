@@ -84,10 +84,23 @@ def find_topics(topics_path: Path, errors: list[str]) -> dict[str, tuple[str, st
     return topics
 
 
-def find_qos_profiles(path: Path) -> set[str]:
+def find_qos_profiles(path: Path, errors: list[str]) -> set[str]:
+    root = parse_xml(path)
+    library = next(
+        (
+            element
+            for element in root.iter()
+            if local_name(element.tag) == "qos_library"
+            and element.attrib.get("name") == "AmbassadorProfiles"
+        ),
+        None,
+    )
+    if library is None:
+        errors.append(f'{path.name} must contain <qos_library name="AmbassadorProfiles">.')
+        return set()
     return {
         element.attrib["name"].strip()
-        for element in parse_xml(path).iter()
+        for element in library
         if local_name(element.tag) == "qos_profile" and element.attrib.get("name", "").strip()
     }
 
@@ -178,7 +191,7 @@ def main() -> int:
     message_types = find_msg_structs(dds_sim_path)
     topics = find_topics(topics_path, errors)
     topic_names = set(topics)
-    qos_profiles = find_qos_profiles(qos_path)
+    qos_profiles = find_qos_profiles(qos_path, errors)
     generated_classes = find_generated_classes(generated_path)
 
     missing_messages = sorted(topic_names - message_types)

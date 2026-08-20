@@ -5,5 +5,7 @@ public sealed record TopicDefinition(
     string QosProfile,
     TopicDirection Direction)
 {
-    public string QualifiedQosProfile => $"AmbassadorProfiles::{QosProfile}";
+    public const string QosLibraryName = "AmbassadorProfiles";
+
+    public string QualifiedQosProfile => $"{QosLibraryName}::{QosProfile}";
 }

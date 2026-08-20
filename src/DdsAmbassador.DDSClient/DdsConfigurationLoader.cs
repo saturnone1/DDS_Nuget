@@ -44,7 +44,12 @@ public static class DdsConfigurationLoader
         ISet<string>? messageTypes)
     {
         var document = XDocument.Load(topicsXmlPath);
-        var topicElements = document.Root?.Elements("topic").ToArray() ?? [];
+        var root = document.Root;
+        if (root?.Name.LocalName != "topics")
+        {
+            throw new DdsConfigurationException("topics.xml root element must be <topics>.");
+        }
+        var topicElements = root.Elements("topic").ToArray();
         if (topicElements.Length == 0)
         {
             throw new DdsConfigurationException("topics.xml must contain at least one <topic> element.");
@@ -94,8 +99,22 @@ public static class DdsConfigurationLoader
     private static ISet<string> LoadQosProfileNames(string qosProfilesXmlPath)
     {
         var document = XDocument.Load(qosProfilesXmlPath);
-        var profiles = document
-            .Descendants("qos_profile")
+        if (document.Root?.Name.LocalName != "dds")
+        {
+            throw new DdsConfigurationException("qos_profiles.xml root element must be <dds>.");
+        }
+        var library = document
+            .Descendants("qos_library")
+            .FirstOrDefault(element =>
+                (string?)element.Attribute("name") == TopicDefinition.QosLibraryName);
+        if (library is null)
+        {
+            throw new DdsConfigurationException(
+                $"qos_profiles.xml must contain <qos_library name=\"{TopicDefinition.QosLibraryName}\">.");
+        }
+
+        var profiles = library
+            .Elements("qos_profile")
             .Select(element => (string?)element.Attribute("name"))
             .Where(name => !string.IsNullOrWhiteSpace(name))
             .Select(name => name!)
@@ -103,7 +122,8 @@ public static class DdsConfigurationLoader
 
         if (profiles.Count == 0)
         {
-            throw new DdsConfigurationException("qos_profiles.xml must contain at least one <qos_profile name=\"...\">.");
+            throw new DdsConfigurationException(
+                $"QoS library '{TopicDefinition.QosLibraryName}' must contain at least one <qos_profile name=\"...\">.");
         }
 
         return profiles;
@@ -112,6 +132,10 @@ public static class DdsConfigurationLoader
     private static ISet<string> LoadMessageTypeNames(string ddsSimXmlPath)
     {
         var document = XDocument.Load(ddsSimXmlPath);
+        if (document.Root?.Name.LocalName != "dds")
+        {
+            throw new DdsConfigurationException("DDSSim.xml root element must be <dds>.");
+        }
         var msgModule = document
             .Descendants("module")
             .FirstOrDefault(element => (string?)element.Attribute("name") == "MSG");

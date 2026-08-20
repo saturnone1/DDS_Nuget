@@ -1,6 +1,7 @@
-using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Xml.Linq;
 using Omg.Dds.Subscription;
 using Rti.Dds.Core;
@@ -13,15 +14,27 @@ namespace DdsAmbassador.DDSClient.Transport;
 
 public sealed class RtiDdsTransport : IDdsTransport
 {
+    /// <summary>
+    /// The dispatch loop re-checks its shutdown flag at this interval so a missed
+    /// GuardCondition trigger cannot pin an RTI worker thread forever.
+    /// </summary>
+    private static readonly Omg.Dds.Core.Duration WaitPollInterval =
+        Omg.Dds.Core.Duration.FromMilliseconds(500);
+
+    private static int _liveTransportCount;
+
     private readonly object _gate = new();
     private readonly DdsClientOptions _options;
     private readonly DomainParticipant _participant;
     private readonly Publisher _publisher;
     private readonly Subscriber _subscriber;
     private readonly QosProvider? _qosProvider;
-    private readonly ConcurrentDictionary<TopicKey, object> _topics = new();
-    private readonly ConcurrentDictionary<TopicKey, IRtiWriter> _writers = new();
+    private readonly Dictionary<TopicKey, object> _topics = [];
+    private readonly Dictionary<TopicKey, IRtiWriter> _writers = [];
     private readonly List<IDisposable> _subscriptions = [];
+    private readonly ManualResetEventSlim _disposeCompleted = new();
+    private int _publishesInFlight;
+    private IWorkerSubscription[] _disposingSubscriptions = [];
     private string? _temporaryQosProfilesXmlPath;
     private int _disposed;
 
@@ -30,17 +43,19 @@ public sealed class RtiDdsTransport : IDdsTransport
         ArgumentNullException.ThrowIfNull(options);
         _options = options;
 
-        var qosProfilesXmlPath = CreateEffectiveQosProfilesXmlPath(
-            DdsClientOptionResolver.ResolveQosProfilesXmlPath(options));
-        var initialPeers = DdsClientOptionResolver.ResolveInitialPeers(options);
+        QosProvider? qosProvider = null;
+        DomainParticipant? participant = null;
 
         try
         {
-            _qosProvider = File.Exists(qosProfilesXmlPath)
+            var qosProfilesXmlPath = CreateEffectiveQosProfilesXmlPath(
+                DdsClientOptionResolver.ResolveQosProfilesXmlPath(options));
+            var initialPeers = DdsClientOptionResolver.ResolveInitialPeers(options);
+            qosProvider = File.Exists(qosProfilesXmlPath)
                 ? new QosProvider(qosProfilesXmlPath)
                 : null;
 
-            var participantQos = _qosProvider?.GetDomainParticipantQos()
+            var participantQos = qosProvider?.GetDomainParticipantQos()
                 ?? QosProvider.Default.GetDomainParticipantQos();
 
             // A QoS file that only defines writer/reader profiles can yield an
@@ -95,13 +110,22 @@ public sealed class RtiDdsTransport : IDdsTransport
                 });
             }
 
-            _participant = DomainParticipantFactory.Instance.CreateParticipant(options.DomainId, participantQos);
-            _publisher = _participant.CreatePublisher();
-            _subscriber = _participant.CreateSubscriber();
+            participant = DomainParticipantFactory.Instance.CreateParticipant(options.DomainId, participantQos);
+            var publisher = participant.CreatePublisher();
+            var subscriber = participant.CreateSubscriber();
+
+            _qosProvider = qosProvider;
+            _participant = participant;
+            _publisher = publisher;
+            _subscriber = subscriber;
+            Interlocked.Increment(ref _liveTransportCount);
         }
         catch
         {
-            _qosProvider?.Dispose();
+            // A participant that survives a failed construction keeps its RTI
+            // worker threads and its discovery sockets, so tear it down fully.
+            DisposeParticipantIgnoringErrors(participant);
+            DisposeIgnoringErrors(qosProvider);
             DeleteTemporaryQosProfilesXml();
             throw;
         }
@@ -109,43 +133,90 @@ public sealed class RtiDdsTransport : IDdsTransport
 
     public void CreatePublisher(TopicDefinition topic, Type sampleType)
     {
-        ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(topic);
         ArgumentNullException.ThrowIfNull(sampleType);
 
-        GetOrCreateWriter(topic, sampleType);
+        EnsureTopicMatchesSampleType(topic, sampleType);
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            GetOrCreateWriter(topic, sampleType);
+        }
     }
 
     public IDisposable Subscribe(TopicDefinition topic, Type sampleType, Action<object> handler)
     {
-        ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(topic);
         ArgumentNullException.ThrowIfNull(sampleType);
         ArgumentNullException.ThrowIfNull(handler);
 
-        var subscription = (IDisposable)InvokeGeneric(
-            nameof(CreateSubscriptionCore),
-            sampleType,
-            topic,
-            handler);
-
+        EnsureTopicMatchesSampleType(topic, sampleType);
         lock (_gate)
         {
+            ThrowIfDisposed();
+            var subscription = (IDisposable)InvokeGeneric(
+                nameof(CreateSubscriptionCore),
+                sampleType,
+                topic,
+                handler);
             _subscriptions.Add(subscription);
+            return new SubscriptionHandle(this, subscription);
         }
-
-        return new SubscriptionHandle(this, subscription);
     }
 
     public void Publish(TopicDefinition topic, Type sampleType, object sample)
     {
-        ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(topic);
         ArgumentNullException.ThrowIfNull(sampleType);
         ArgumentNullException.ThrowIfNull(sample);
 
-        var writer = GetOrCreateWriter(topic, sampleType);
-        writer.Write(sample);
+        EnsureTopicMatchesSampleType(topic, sampleType);
+
+        IRtiWriter writer;
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            writer = GetOrCreateWriter(topic, sampleType);
+
+            // Counted inside the same lock section as the disposed check, so once
+            // Dispose has set the flag no further publish can register and the count
+            // only falls. That is what makes the drain below terminate.
+            Interlocked.Increment(ref _publishesInFlight);
+        }
+
+        try
+        {
+            // Deliberately outside the lock. The only shipped QoS profile is RELIABLE
+            // with KEEP_ALL history, so a slow subscriber's backpressure blocks this
+            // call - and holding _gate across it meant one stalled reader could block
+            // Dispose, which also takes _gate.
+            writer.Write(sample);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _publishesInFlight);
+        }
+    }
+
+    /// <summary>
+    /// Waits for publishes that are already past the disposed check to finish, so the
+    /// participant is not deleted while a write is still inside RTI.
+    /// </summary>
+    /// <returns><see langword="false"/> if publishes were still in flight at the timeout.</returns>
+    private bool DrainPublishes(TimeSpan timeout)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (Volatile.Read(ref _publishesInFlight) > 0)
+        {
+            if (elapsed.Elapsed >= timeout)
+            {
+                return false;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        return true;
     }
 
     public void Dispose()
@@ -162,28 +233,113 @@ public sealed class RtiDdsTransport : IDdsTransport
             _subscriptions.Clear();
         }
 
-        foreach (var subscription in subscriptions)
+        var workers = subscriptions.OfType<IWorkerSubscription>().ToArray();
+        _disposingSubscriptions = workers;
+
+        // Stop every dispatch loop first: the participant cannot be deleted while
+        // its readers are still in use, and an unstopped loop keeps RTI's internal
+        // threads (and the discovery sockets they own) alive after Dispose returns.
+        foreach (var worker in workers)
         {
-            subscription.Dispose();
+            worker.RequestStop();
         }
 
-        _participant.Dispose();
-        _qosProvider?.Dispose();
-        DeleteTemporaryQosProfilesXml();
+        if (workers.Any(worker => worker.IsCurrentWorkerThread))
+        {
+            // Dispose was called from a dispatch loop, which must return before it
+            // can be joined. Hand the teardown to another thread; callers observe
+            // its completion through WaitForDisposeCompletion.
+            var cleanupThread = new Thread(() =>
+            {
+                try
+                {
+                    CompleteDispose(workers);
+                }
+                catch (Exception)
+                {
+                    // Already logged by CompleteDispose. Letting it escape a bare thread
+                    // would take the process down during an orderly shutdown.
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "dds-transport-shutdown"
+            };
+            cleanupThread.Start();
+            return;
+        }
+
+        CompleteDispose(workers);
+    }
+
+    /// <summary>
+    /// Blocks until the teardown started by <see cref="Dispose"/> has finished, so a
+    /// host can be sure the DomainParticipant (and the ports it owns) is gone before
+    /// the process exits.
+    /// </summary>
+    /// <returns>
+    /// <see langword="false"/> only when teardown was still running at <paramref name="timeout"/>.
+    /// Returns <see langword="true"/> when called from a dispatch loop that teardown is
+    /// itself waiting on: that thread cannot wait for its own exit, and blocking there
+    /// would deadlock shutdown rather than confirm it.
+    /// </returns>
+    public bool WaitForDisposeCompletion(TimeSpan timeout)
+    {
+        if (_disposingSubscriptions.Any(subscription => subscription.IsCurrentWorkerThread))
+        {
+            return true;
+        }
+
+        return _disposeCompleted.Wait(timeout);
+    }
+
+    public bool WaitForDisposeCompletion() => WaitForDisposeCompletion(DdsClientOptionResolver.ResolveShutdownTimeout());
+
+    /// <summary>
+    /// Drops a subscription the caller has disposed. Without this the list only ever
+    /// grew, so a service that subscribes and unsubscribes over its lifetime kept every
+    /// dead subscription alive until the transport itself went away.
+    /// </summary>
+    private void ForgetSubscription(IDisposable subscription)
+    {
+        lock (_gate)
+        {
+            _subscriptions.Remove(subscription);
+        }
+    }
+
+    /// <summary>Subscriptions still tracked for shutdown. For tests.</summary>
+    internal int TrackedSubscriptionCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _subscriptions.Count;
+            }
+        }
     }
 
     private object GetOrCreateTopic(TopicDefinition topic, Type sampleType)
     {
         var key = new TopicKey(topic.Name, sampleType);
-        return _topics.GetOrAdd(key, _ =>
-            InvokeGeneric(nameof(CreateTopicCore), sampleType, topic));
+        if (!_topics.TryGetValue(key, out var result))
+        {
+            result = InvokeGeneric(nameof(CreateTopicCore), sampleType, topic);
+            _topics.Add(key, result);
+        }
+        return result;
     }
 
     private IRtiWriter GetOrCreateWriter(TopicDefinition topic, Type sampleType)
     {
         var key = new TopicKey(topic.Name, sampleType);
-        return _writers.GetOrAdd(key, _ =>
-            (IRtiWriter)InvokeGeneric(nameof(CreateWriterCore), sampleType, topic));
+        if (!_writers.TryGetValue(key, out var writer))
+        {
+            writer = (IRtiWriter)InvokeGeneric(nameof(CreateWriterCore), sampleType, topic);
+            _writers.Add(key, writer);
+        }
+        return writer;
     }
 
     private Topic<T> CreateTopicCore<T>(TopicDefinition topic)
@@ -220,17 +376,18 @@ public sealed class RtiDdsTransport : IDdsTransport
             BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic)
             ?? throw new MissingMethodException(nameof(RtiDdsTransport), methodName);
 
-        var result = method.MakeGenericMethod(sampleType).Invoke(this, args);
+        object? result;
+        try
+        {
+            result = method.MakeGenericMethod(sampleType).Invoke(this, args);
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            throw;
+        }
         return result
             ?? throw new DdsOperationException($"RTI operation '{methodName}' returned null.");
-    }
-
-    private void RemoveSubscription(IDisposable subscription)
-    {
-        lock (_gate)
-        {
-            _subscriptions.Remove(subscription);
-        }
     }
 
     private void ThrowIfDisposed()
@@ -268,8 +425,8 @@ public sealed class RtiDdsTransport : IDdsTransport
 
     private static string? ResolveMulticastAddressOverride()
     {
-        var general = NormalizeEnvironmentValue("DDS_MULTICAST_ADDRESS");
-        var receive = NormalizeEnvironmentValue("DDS_MULTICAST_RECEIVE_ADDRESS");
+        var general = DdsClientOptionResolver.NormalizeEnvironmentValue("DDS_MULTICAST_ADDRESS");
+        var receive = DdsClientOptionResolver.NormalizeEnvironmentValue("DDS_MULTICAST_RECEIVE_ADDRESS");
 
         var selected = FirstNonEmpty(receive, general);
         if (selected is null)
@@ -285,12 +442,6 @@ public sealed class RtiDdsTransport : IDdsTransport
 
         ValidateMulticastAddress(selected);
         return selected;
-    }
-
-    private static string? NormalizeEnvironmentValue(string name)
-    {
-        var value = Environment.GetEnvironmentVariable(name);
-        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
     private static string? FirstNonEmpty(params string?[] values)
@@ -337,15 +488,200 @@ public sealed class RtiDdsTransport : IDdsTransport
         void Write(object sample);
     }
 
+    private interface IWorkerSubscription : IDisposable
+    {
+        bool IsCurrentWorkerThread { get; }
+
+        void RequestStop();
+
+        /// <returns><see langword="true"/> when the dispatch loop stopped and its
+        /// DDS entities were released.</returns>
+        bool WaitForShutdown(TimeSpan timeout);
+    }
+
     private sealed class RtiWriter<T>(DdsClientOptions options, DataWriter<T> writer) : IRtiWriter
     {
         public void Write(object sample)
         {
-            DdsClientLog.Debug(
-                options,
-                $"Writer<{typeof(T).FullName}> matched={writer.PublicationMatchedStatus.CurrentCount}, " +
-                $"incompatibleQos={writer.OfferedIncompatibleQosStatus.TotalCount.Value}");
+            // Both status properties are native calls. Reading them unconditionally cost
+            // every publish two round trips into RTI even with logging switched off.
+            if (DdsClientLog.IsEnabled(options, DdsLogLevel.Debug))
+            {
+                DdsClientLog.Debug(
+                    options,
+                    $"Writer<{typeof(T).FullName}> matched={writer.PublicationMatchedStatus.CurrentCount}, " +
+                    $"incompatibleQos={writer.OfferedIncompatibleQosStatus.TotalCount.Value}");
+            }
+
             writer.Write((T)sample);
+        }
+    }
+
+    private static void EnsureTopicMatchesSampleType(TopicDefinition topic, Type sampleType)
+    {
+        if (!topic.Name.Equals(sampleType.Name, StringComparison.Ordinal))
+        {
+            throw new DdsOperationException(
+                $"Topic '{topic.Name}' requires sample type '{topic.Name}', but '{sampleType.FullName}' was provided.");
+        }
+    }
+
+    private void CompleteDispose(IEnumerable<IWorkerSubscription> subscriptions)
+    {
+        Exception? firstFailure = null;
+        var timeout = DdsClientOptionResolver.ResolveShutdownTimeout();
+        var allWorkersStopped = true;
+
+        try
+        {
+            foreach (var subscription in subscriptions)
+            {
+                var stopped = false;
+                CaptureCleanupFailure(() => stopped = subscription.WaitForShutdown(timeout), ref firstFailure);
+                allWorkersStopped &= stopped;
+            }
+
+            // After the dispatch loops, because a handler can publish: stopping them
+            // first means fewer publishes are still in flight to wait for.
+            var publishesDrained = DrainPublishes(timeout);
+
+            if (allWorkersStopped && publishesDrained)
+            {
+                CaptureCleanupFailure(DisposeParticipant, ref firstFailure);
+            }
+            else
+            {
+                // Something is still inside RTI - a wedged dispatch loop holding the
+                // reader, or a publish blocked on backpressure. Deleting the participant
+                // underneath it would fault in native code, so leak it deliberately and
+                // let process exit reclaim the ports.
+                var stalled = !allWorkersStopped && !publishesDrained
+                    ? "One or more DDS dispatch loops and at least one publish"
+                    : !allWorkersStopped
+                        ? "One or more DDS dispatch loops"
+                        : "At least one publish";
+                DdsClientLog.Error(
+                    _options,
+                    $"{stalled} did not finish within {timeout}. " +
+                    "The DomainParticipant was left undeleted to avoid tearing down entities still in use.");
+            }
+
+            if (_qosProvider is not null)
+            {
+                CaptureCleanupFailure(_qosProvider.Dispose, ref firstFailure);
+            }
+            DeleteTemporaryQosProfilesXml();
+        }
+        finally
+        {
+            // Always publish completion; a caller waiting on shutdown must never be
+            // stranded because a cleanup step threw.
+            _disposeCompleted.Set();
+        }
+
+        if (firstFailure is not null)
+        {
+            DdsClientLog.Error(_options, "RTI transport cleanup reported a failure.", firstFailure);
+            ExceptionDispatchInfo.Capture(firstFailure).Throw();
+        }
+    }
+
+    private void DisposeParticipant()
+    {
+        lock (_gate)
+        {
+            _writers.Clear();
+            _topics.Clear();
+        }
+
+        // Delete writers, topics, the publisher and the subscriber before the
+        // participant itself: a participant that still contains entities fails
+        // deletion with PreconditionNotMet and keeps its RTI threads running.
+        _participant.DisposeContainedEntities();
+        _participant.Dispose();
+
+        ReleaseFactoryIfLastTransport();
+    }
+
+    /// <summary>
+    /// Releases the middleware-global resources held by the DomainParticipantFactory
+    /// once the last transport in this process is gone. Skipped when
+    /// DDS_FINALIZE_FACTORY is set to 0/false.
+    /// </summary>
+    private void ReleaseFactoryIfLastTransport()
+    {
+        if (Interlocked.Decrement(ref _liveTransportCount) != 0)
+        {
+            return;
+        }
+
+        var setting = DdsClientOptionResolver.NormalizeEnvironmentValue("DDS_FINALIZE_FACTORY");
+        if (setting is not null &&
+            (setting.Equals("0", StringComparison.Ordinal) ||
+             setting.Equals("false", StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        try
+        {
+            DomainParticipantFactory.Instance.Dispose();
+        }
+        catch (Exception ex)
+        {
+            // Best-effort: the participant is already gone, which is what releases
+            // the ports. A new Instance call starts a fresh factory lifecycle.
+            DdsClientLog.Error(_options, "Finalizing the DomainParticipantFactory failed.", ex);
+        }
+    }
+
+    private void DisposeParticipantIgnoringErrors(DomainParticipant? participant)
+    {
+        if (participant is null)
+        {
+            return;
+        }
+
+        try
+        {
+            participant.DisposeContainedEntities();
+        }
+        catch (Exception ex)
+        {
+            DdsClientLog.Error(_options, "Deleting contained DDS entities failed.", ex);
+        }
+
+        try
+        {
+            participant.Dispose();
+        }
+        catch (Exception ex)
+        {
+            DdsClientLog.Error(_options, "Deleting the DomainParticipant failed.", ex);
+        }
+    }
+
+    private static void DisposeIgnoringErrors(IDisposable? resource)
+    {
+        try
+        {
+            resource?.Dispose();
+        }
+        catch
+        {
+            // Preserve the original initialization failure.
+        }
+    }
+
+    private static void CaptureCleanupFailure(Action cleanup, ref Exception? firstFailure)
+    {
+        try
+        {
+            cleanup();
+        }
+        catch (Exception ex)
+        {
+            firstFailure ??= ex;
         }
     }
 
@@ -360,63 +696,166 @@ public sealed class RtiDdsTransport : IDdsTransport
                 return;
             }
 
-            owner.RemoveSubscription(inner);
-            inner.Dispose();
+            // Dispose first and deregister after: inner.Dispose joins the dispatch
+            // thread, and doing that while holding the transport's lock would stall
+            // every other caller - including Dispose itself.
+            try
+            {
+                inner.Dispose();
+            }
+            finally
+            {
+                owner.ForgetSubscription(inner);
+            }
         }
     }
 
-    private sealed class RtiSubscription<T> : IDisposable
+    private sealed class RtiSubscription<T> : IWorkerSubscription
     {
         private readonly DdsClientOptions _options;
         private readonly DataReader<T> _reader;
         private readonly ReadCondition _readCondition;
-        private readonly GuardCondition _shutdownCondition = new();
-        private readonly WaitSet _waitSet = new();
+        private readonly GuardCondition _shutdownCondition;
+        private readonly WaitSet _waitSet;
         private readonly Action<T> _handler;
         private readonly Thread _worker;
         private int _disposed;
+        private readonly ManualResetEventSlim _cleanupFinished = new();
+        private int _cleanupStarted;
+        private Exception? _cleanupFailure;
 
         public RtiSubscription(DdsClientOptions options, DataReader<T> reader, Action<T> handler)
         {
             _options = options;
             _reader = reader;
             _handler = handler;
-            _readCondition = _reader.CreateReadCondition(DataState.Any);
-            _waitSet.AttachCondition(_readCondition);
-            _waitSet.AttachCondition(_shutdownCondition);
-
-            _worker = new Thread(DispatchLoop)
+            ReadCondition? readCondition = null;
+            GuardCondition? shutdownCondition = null;
+            WaitSet? waitSet = null;
+            var readAttached = false;
+            var shutdownAttached = false;
+            try
             {
-                IsBackground = true,
-                Name = $"dds-subscription-{typeof(T).Name}"
-            };
-            _worker.Start();
+                readCondition = _reader.CreateReadCondition(DataState.Any);
+                shutdownCondition = new GuardCondition();
+                waitSet = new WaitSet();
+                waitSet.AttachCondition(readCondition);
+                readAttached = true;
+                waitSet.AttachCondition(shutdownCondition);
+                shutdownAttached = true;
+
+                _readCondition = readCondition;
+                _shutdownCondition = shutdownCondition;
+                _waitSet = waitSet;
+                _worker = new Thread(DispatchLoop)
+                {
+                    IsBackground = true,
+                    Name = $"dds-subscription-{typeof(T).Name}"
+                };
+                _worker.Start();
+            }
+            catch
+            {
+                if (shutdownAttached) TryCleanup(() => waitSet!.DetachCondition(shutdownCondition!));
+                if (readAttached) TryCleanup(() => waitSet!.DetachCondition(readCondition!));
+                DisposeIgnoringErrors(readCondition);
+                DisposeIgnoringErrors(shutdownCondition);
+                DisposeIgnoringErrors(waitSet);
+                DisposeIgnoringErrors(reader);
+                throw;
+            }
         }
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            RequestStop();
+
+            if (IsCurrentWorkerThread)
             {
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    try
+                    {
+                        WaitForShutdown(DdsClientOptionResolver.ResolveShutdownTimeout());
+                    }
+                    catch (Exception ex)
+                    {
+                        DdsClientLog.Error(_options, "Asynchronous RTI subscription cleanup failed.", ex);
+                    }
+                });
                 return;
             }
 
-            _shutdownCondition.TriggerValue = true;
-            _worker.Join();
-            _waitSet.DetachCondition(_readCondition);
-            _waitSet.DetachCondition(_shutdownCondition);
-            _readCondition.Dispose();
-            _shutdownCondition.Dispose();
-            _waitSet.Dispose();
-            _reader.Dispose();
+            WaitForShutdown(DdsClientOptionResolver.ResolveShutdownTimeout());
+        }
+
+        public bool IsCurrentWorkerThread => Thread.CurrentThread == _worker;
+
+        public void RequestStop()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                _shutdownCondition.TriggerValue = true;
+            }
+        }
+
+        public bool WaitForShutdown(TimeSpan timeout)
+        {
+            if (IsCurrentWorkerThread)
+            {
+                return false;
+            }
+
+            if (!_worker.Join(timeout))
+            {
+                DdsClientLog.Error(
+                    _options,
+                    $"DDS dispatch loop for type '{typeof(T).FullName}' did not stop within {timeout}. " +
+                    "Its reader and WaitSet were left undisposed.");
+                return false;
+            }
+
+            if (Interlocked.CompareExchange(ref _cleanupStarted, 1, 0) != 0)
+            {
+                _cleanupFinished.Wait();
+                if (_cleanupFailure is not null)
+                {
+                    ExceptionDispatchInfo.Capture(_cleanupFailure).Throw();
+                }
+                return true;
+            }
+
+            Exception? firstFailure = null;
+            CaptureCleanupFailure(() => _waitSet.DetachCondition(_readCondition), ref firstFailure);
+            CaptureCleanupFailure(() => _waitSet.DetachCondition(_shutdownCondition), ref firstFailure);
+            CaptureCleanupFailure(_readCondition.Dispose, ref firstFailure);
+            CaptureCleanupFailure(_shutdownCondition.Dispose, ref firstFailure);
+            CaptureCleanupFailure(_waitSet.Dispose, ref firstFailure);
+            CaptureCleanupFailure(_reader.Dispose, ref firstFailure);
+            _cleanupFailure = firstFailure;
+            _cleanupFinished.Set();
+
+            if (firstFailure is not null)
+            {
+                ExceptionDispatchInfo.Capture(firstFailure).Throw();
+            }
+
+            return true;
         }
 
         private void DispatchLoop()
         {
-            while (_disposed == 0)
+            while (Volatile.Read(ref _disposed) == 0)
             {
                 try
                 {
-                    foreach (var condition in _waitSet.Wait())
+                    var triggered = WaitForConditions();
+                    if (triggered is null)
+                    {
+                        continue;
+                    }
+
+                    foreach (var condition in triggered)
                     {
                         if (ReferenceEquals(condition, _shutdownCondition))
                         {
@@ -437,6 +876,37 @@ public sealed class RtiDdsTransport : IDdsTransport
                 {
                     return;
                 }
+                catch (Exception ex)
+                {
+                    DdsClientLog.Error(
+                        _options,
+                        $"RTI dispatch loop failed for type '{typeof(T).FullName}'. The subscription will stop.",
+                        ex);
+                    return;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Waits for the next triggered condition, bounded by the poll interval so a
+        /// shutdown trigger this thread never observed cannot leave it parked in
+        /// nddscore's condition wait for the life of the process.
+        /// </summary>
+        /// <returns>
+        /// The triggered conditions, or <see langword="null"/> when the poll interval
+        /// expired with nothing triggered. The timeout is caught here and nowhere wider,
+        /// so a TimeoutException raised by a handler - a reliable writer hitting
+        /// max_blocking_time, say - is still reported rather than mistaken for an idle poll.
+        /// </returns>
+        private IEnumerable<Condition>? WaitForConditions()
+        {
+            try
+            {
+                return _waitSet.Wait(WaitPollInterval).ToArray();
+            }
+            catch (TimeoutException)
+            {
+                return null;
             }
         }
 
@@ -450,6 +920,10 @@ public sealed class RtiDdsTransport : IDdsTransport
                     try
                     {
                         _handler(sample.Data);
+                        if (_disposed != 0)
+                        {
+                            return;
+                        }
                     }
                     catch (Exception ex) when (_disposed == 0)
                     {
@@ -459,6 +933,18 @@ public sealed class RtiDdsTransport : IDdsTransport
                             ex);
                     }
                 }
+            }
+        }
+
+        private static void TryCleanup(Action cleanup)
+        {
+            try
+            {
+                cleanup();
+            }
+            catch
+            {
+                // Preserve the original subscription initialization failure.
             }
         }
     }

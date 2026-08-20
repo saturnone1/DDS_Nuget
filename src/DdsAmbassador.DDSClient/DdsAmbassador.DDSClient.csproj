@@ -21,6 +21,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="DdsAmbassador.DDSClient.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Update="Generated\**\*.cs">
       <Nullable>disable</Nullable>
     </Compile>

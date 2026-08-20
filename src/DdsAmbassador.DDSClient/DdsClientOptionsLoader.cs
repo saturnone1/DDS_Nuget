@@ -26,6 +26,10 @@ internal static class DdsClientOptionsLoader
 
         var document = XDocument.Load(configPath);
         var root = document.Root ?? throw new DdsConfigurationException($"{configPath} must contain a root element.");
+        if (root.Name.LocalName != "dds_client")
+        {
+            throw new DdsConfigurationException($"{configPath} root element must be <dds_client>.");
+        }
         var baseDirectory = Path.GetDirectoryName(configPath) ?? Environment.CurrentDirectory;
 
         var initialPeers = root.Element("initial_peers")?

@@ -91,6 +91,7 @@ public sealed class DdsClient : IDisposable
         ArgumentNullException.ThrowIfNull(sample);
 
         var topic = Configuration.GetTopic(topicName);
+        EnsureTopicMatchesSampleType(topic, sample.GetType());
         EnsureCanPublish(topic);
         LogSend(topic, sample);
         _transport.Publish(topic, sample.GetType(), sample);
@@ -103,6 +104,7 @@ public sealed class DdsClient : IDisposable
         ArgumentNullException.ThrowIfNull(handler);
 
         var topic = Configuration.GetTopic(topicName);
+        EnsureTopicMatchesSampleType(topic, sampleType);
         EnsureCanSubscribe(topic);
         return _transport.Subscribe(topic, sampleType, sample =>
         {
@@ -119,6 +121,17 @@ public sealed class DdsClient : IDisposable
         }
 
         _transport.Dispose();
+
+        // When Dispose runs on a DDS dispatch thread the transport tears itself down on
+        // a separate thread. Wait for it here so the DomainParticipant - and the ports
+        // it owns - are released before the host finishes shutting down. Asking through
+        // the interface keeps this working for a transport that wraps another one.
+        if (!_transport.WaitForDisposeCompletion(DdsClientOptionResolver.ResolveShutdownTimeout()))
+        {
+            DdsClientLog.Error(
+                Options,
+                "DDS transport shutdown did not complete in time. DDS ports may stay bound until this process exits.");
+        }
     }
 
     private TopicDefinition ResolveTopic(Type sampleType)
@@ -150,6 +163,15 @@ public sealed class DdsClient : IDisposable
         }
     }
 
+    private static void EnsureTopicMatchesSampleType(TopicDefinition topic, Type sampleType)
+    {
+        if (!topic.Name.Equals(sampleType.Name, StringComparison.Ordinal))
+        {
+            throw new DdsOperationException(
+                $"Topic '{topic.Name}' requires sample type '{topic.Name}', but '{sampleType.FullName}' was provided.");
+        }
+    }
+
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
@@ -157,6 +179,14 @@ public sealed class DdsClient : IDisposable
 
     private void LogSend(TopicDefinition topic, object sample)
     {
+        // Guard before interpolating: {sample} calls ToString(), which for an
+        // rtiddsgen type routes into RTI's native type support and serializes every
+        // field - on every publish, at every log level.
+        if (!DdsClientLog.IsEnabled(Options, DdsLogLevel.Debug))
+        {
+            return;
+        }
+
         DdsClientLog.Debug(
             Options,
             $"TX topic={topic.Name}, type={sample.GetType().FullName}{Environment.NewLine}{sample}");
@@ -164,6 +194,11 @@ public sealed class DdsClient : IDisposable
 
     private void LogReceive(TopicDefinition topic, object sample)
     {
+        if (!DdsClientLog.IsEnabled(Options, DdsLogLevel.Debug))
+        {
+            return;
+        }
+
         DdsClientLog.Debug(
             Options,
             $"RX topic={topic.Name}, type={sample.GetType().FullName}{Environment.NewLine}{sample}");
