@@ -182,6 +182,129 @@ public sealed class RtiShutdownTests
             "which suggests DDS entities are leaking again.");
     }
 
+    /// <summary>
+    /// Publishing concurrently with Dispose must not deadlock or fault, and Dispose must
+    /// still finish. This drives the in-flight drain that guards participant deletion.
+    ///
+    /// Note what this does NOT prove: that a *blocked* write cannot stall Dispose. That
+    /// needs a stalled reliable reader applying real backpressure, which there is no
+    /// deterministic way to arrange here. The lock ordering is the actual guarantee.
+    /// </summary>
+    [RtiFact]
+    public void ConcurrentPublishDoesNotBlockDispose()
+    {
+        var options = RtiRuntime.CreateOptions();
+        var transport = new RtiDdsTransport(options);
+        var client = new DdsClient(options, transport);
+        var publisher = client.CreatePublisher<TimeTickInformation>();
+
+        using var publishing = new ManualResetEventSlim();
+        var stop = false;
+        Exception? unexpected = null;
+
+        var publisherThread = new Thread(() =>
+        {
+            while (!Volatile.Read(ref stop))
+            {
+                try
+                {
+                    publisher.Publish(new TimeTickInformation());
+                    publishing.Set();
+                }
+                catch (ObjectDisposedException)
+                {
+                    return; // expected once Dispose wins the race
+                }
+                catch (Exception ex)
+                {
+                    unexpected = ex;
+                    return;
+                }
+            }
+        })
+        { IsBackground = true, Name = "test-publisher" };
+
+        publisherThread.Start();
+        Assert.True(publishing.Wait(HardLimit), "The publisher thread never got a sample out.");
+
+        var elapsed = Time(client.Dispose);
+        Volatile.Write(ref stop, true);
+        publisherThread.Join(HardLimit);
+
+        Assert.True(elapsed < HardLimit, $"Dispose took {elapsed} while a publisher was running.");
+        Assert.True(
+            transport.WaitForDisposeCompletion(HardLimit),
+            "Teardown did not complete after concurrent publishing.");
+        Assert.Null(unexpected);
+    }
+
+    /// <summary>
+    /// Disposing the handle returned by Subscribe must also stop the transport tracking
+    /// it. The list used to only ever grow.
+    /// </summary>
+    [RtiFact]
+    public void DisposingSubscriptionHandleStopsTrackingIt()
+    {
+        var options = RtiRuntime.CreateOptions();
+        using var transport = new RtiDdsTransport(options);
+        var client = new DdsClient(options, transport);
+
+        Assert.Equal(0, transport.TrackedSubscriptionCount);
+
+        for (var i = 0; i < 5; i++)
+        {
+            var subscription = client.Subscribe<TimeTickInformation>(_ => { });
+            Assert.Equal(1, transport.TrackedSubscriptionCount);
+            subscription.Dispose();
+            Assert.Equal(0, transport.TrackedSubscriptionCount);
+        }
+    }
+
+    /// <summary>
+    /// DdsClient used to wait for teardown only when the transport was exactly an
+    /// RtiDdsTransport, so wrapping one silently skipped the wait.
+    /// </summary>
+    [RtiFact]
+    public void WrappedTransportStillWaitsForShutdown()
+    {
+        var options = RtiRuntime.CreateOptions();
+        var inner = new RtiDdsTransport(options);
+        var wrapper = new RecordingTransport(inner);
+
+        var client = new DdsClient(options, wrapper);
+        using (client.Subscribe<TimeTickInformation>(_ => { }))
+        {
+            client.CreatePublisher<TimeTickInformation>();
+        }
+
+        client.Dispose();
+
+        Assert.True(wrapper.WaitWasCalled, "DdsClient.Dispose did not ask the transport to finish teardown.");
+    }
+
+    /// <summary>A transport that only forwards, to prove the wait goes through the interface.</summary>
+    private sealed class RecordingTransport(IDdsTransport inner) : IDdsTransport
+    {
+        public bool WaitWasCalled { get; private set; }
+
+        public void CreatePublisher(TopicDefinition topic, Type sampleType) =>
+            inner.CreatePublisher(topic, sampleType);
+
+        public IDisposable Subscribe(TopicDefinition topic, Type sampleType, Action<object> handler) =>
+            inner.Subscribe(topic, sampleType, handler);
+
+        public void Publish(TopicDefinition topic, Type sampleType, object sample) =>
+            inner.Publish(topic, sampleType, sample);
+
+        public bool WaitForDisposeCompletion(TimeSpan timeout)
+        {
+            WaitWasCalled = true;
+            return inner.WaitForDisposeCompletion(timeout);
+        }
+
+        public void Dispose() => inner.Dispose();
+    }
+
     private static int CurrentHandleCount()
     {
         var process = Process.GetCurrentProcess();
