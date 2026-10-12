@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>DdsAmbassador.DDSClient.Core</AssemblyName>
+    <PackageId>DdsAmbassador.DDSClient.Core</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Schema-independent RTI DDS connection and lifecycle core.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Rti.ConnextDds" Version="7.3.1" />
+    <InternalsVisibleTo Include="DdsAmbassador.DDSClient.Tests" />
+    <InternalsVisibleTo Include="ddsclient" />
+  </ItemGroup>
+</Project>

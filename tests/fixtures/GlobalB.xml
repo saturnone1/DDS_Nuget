@@ -1,0 +1,4 @@
+<dds xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="rti_dds_profiles.xsd"><types>
+  <enum name="GlobalMode"><enumerator name="Idle" value="1"/></enum>
+  <module name="Common"><struct name="Status"><member name="mode" type="nonBasic" nonBasicTypeName="GlobalMode"/></struct></module>
+</types></dds>

@@ -1,8 +1,0 @@
-**/bin/
-**/obj/
-artifacts/
-build/
-build-*/
-DDSClient.iso
-.git/
-.vs/

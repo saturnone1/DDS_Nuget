@@ -1,0 +1,4 @@
+<dds xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="rti_dds_profiles.xsd"><types>
+  <module name="Outer"><module name="Common"><struct name="NestedStatus"><member name="value" type="long"/></struct></module></module>
+  <module name="Common"><struct name="RootStatus"><member name="value" type="long"/></struct></module>
+</types></dds>
