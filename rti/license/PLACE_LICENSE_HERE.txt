@@ -1,1 +1,1 @@
-Place rti_license.dat here
+rti_license.dat 파일을 여기에 두세요.

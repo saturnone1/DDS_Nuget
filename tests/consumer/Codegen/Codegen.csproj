@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net9.0</TargetFramework><OutputType>Exe</OutputType><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../build/codegen-regression/Nested/DdsAmbassador.Messages.Nested.csproj"/>
+    <ProjectReference Include="../../../build/codegen-regression/GlobalA/DdsAmbassador.Messages.GlobalA.csproj"/>
+    <ProjectReference Include="../../../build/codegen-regression/GlobalB/DdsAmbassador.Messages.GlobalB.csproj"/>
+    <ProjectReference Include="../../../build/codegen-regression/Keyword/DdsAmbassador.Messages.Keyword.csproj"/>
+  </ItemGroup>
+</Project>

@@ -1,6 +1,7 @@
 **/bin/
 **/obj/
 artifacts/
+generated/
 build/
 build-*/
 .airgap-check/
@@ -17,7 +18,9 @@ DDSClient.iso
 rti/license/*.dat
 rti/connext/rti_license.dat
 
-# Keep RTI Connext installations local. The repository keeps generated C# files,
-# so rtiddsgen is needed only when DDS_GENERATE=ON or generate-dds.* is run.
+# RTI 설치본은 로컬에 둔다. generated/는 자동 생성물이며 소스 번들에 포함할 수 있다.
 rti/connext/*
 !rti/connext/README.md
+
+__pycache__/
+*.pyc

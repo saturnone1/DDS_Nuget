@@ -1,0 +1,3 @@
+<dds xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="rti_dds_profiles.xsd"><types>
+  <module name="event"><struct name="Status"><member name="value" type="long"/></struct></module>
+</types></dds>

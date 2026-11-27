@@ -1,57 +1,45 @@
-# DdsAmbassador.DDSClient
+# DDS .NET client
 
-Typed .NET 9 DDS client helpers for DdsAmbassador messages.
+.NET 9 RTI Connext DDS connection/lifecycle core with independently generated
+C# message modules. The core package is `DdsAmbassador.DDSClient.Core`; schema
+packages are generated as `DdsAmbassador.Messages.<Module>`. RTI Connext DDS
+7.3.1 is required.
 
-This repository keeps the C# DDS types generated from `definitions/DDSSim.xml`
-under `src/DdsAmbassador.DDSClient/Generated`. Normal restore/build/test/pack
-does not require `rtiddsgen`. RTI code generation is needed only when message
-definitions change.
+This repository is the `DDS_Nuget/` submodule of
+[DDSClient](https://github.com/saturnone1/DDSClient). The parent owns shared
+XML definitions, code generators, the CLI, offline NuGet feeds, and detailed
+documentation. Build from that parent checkout; a standalone clone does not
+contain those inputs or generated message types.
 
-## Quick Build
+## Build and test
 
-```bash
-cmake -S . -B build
-cmake --build build
+On Windows, use PowerShell 7 with .NET 9, Python, and RTI Connext installed:
+
+```powershell
+git clone --recurse-submodules https://github.com/saturnone1/DDSClient.git
+cd DDSClient
+./build.ps1 -Language CSharp -Target Windows -WithTests -WithCli
 ```
 
-The default CMake build validates DDS definitions, restores packages, builds the
-library and CLI, runs tests, and creates the NuGet package under
-`artifacts/packages`.
+This generates message modules, restores the parent's local NuGet feeds,
+builds the core and modules, runs the selected tests, and creates packages
+in `DDS_Nuget/artifacts/packages/`. RTI generator/native libraries and a
+valid runtime license must be supplied separately under their applicable terms.
 
-To publish the CLI:
+## Structure
 
-```bash
-cmake --build build --target dds_publish_cli
-dotnet artifacts/ddsclient/ddsclient.dll list
-```
+- `core/api/`: connections, publishers, modules, topic definitions, shutdown state
+- `core/configuration/`: options, network selection, and QoS configuration
+- `core/transport/`: RTI resources, dispatch, and bounded background cleanup
+- `core/testing/`: internal in-memory test transport
+- `generated/`: generated message-module projects and build selection
+- `tests/`: lifecycle, delivery, module isolation, and transport regressions
 
-## Message Change Workflow
+Connection options select message modules, topics, domain, and QoS. New
+message schemas are compiled into separate packages without rebuilding the
+core. The CLI is maintained in the parent's `cli/csharp/` directory.
 
-1. Edit `definitions/DDSSim.xml`.
-2. Add or remove the matching topic in `definitions/topics.xml`.
-3. Regenerate DDS C# types with RTI `rtiddsgen`.
-4. Build and pack.
-
-```bash
-cmake -S . -B build -DDDS_GENERATE=ON
-cmake --build build
-```
-
-If `rtiddsgen` is not available on the machine, regenerate the files on a
-machine that has RTI Connext installed and commit the updated generated C# files.
-
-## Repository Layout
-
-```text
-definitions/                         DDS type, topic, QoS, and client XML files
-docs/                                usage, API, design, and Kubernetes notes
-rti/nupkg/                           local RTI NuGet package feed
-rti/connext/README.md                local RTI install guidance
-src/DdsAmbassador.DDSClient/         NuGet library
-src/DdsAmbassador.DDSClient.Cli/     manual validation CLI
-tests/                               focused xUnit coverage
-tools/                               generation, validation, and package scripts
-```
-
-See `docs/usage.md` for integration details and `docs/cli.md` for Kubernetes
-manual validation.
+For supported API usage and deployment, start with the parent
+[C# guide](https://github.com/saturnone1/DDSClient/blob/main/docs/csharp.md),
+[configuration guide](https://github.com/saturnone1/DDSClient/blob/main/docs/configuration.md),
+and [build/offline guide](https://github.com/saturnone1/DDSClient/blob/main/docs/build.md).

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable><LangVersion>latest</LangVersion><EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Version>0.1.0</Version><PackageId>DdsAmbassador.Messages.Diagnostics</PackageId>
+    <AssemblyName>DdsAmbassador.Messages.Diagnostics</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Generated/*.cs" /><Compile Include="DiagnosticsMessages.cs" />
+  </ItemGroup>
+</Project>
