@@ -15,7 +15,7 @@ namespace DdsAmbassador.DDSClient.Tests;
 /// RTI worker threads parked in cond_wait.
 ///
 /// These tests drive the real RTI runtime and are skipped when it is unavailable.
-/// They share process-wide state (environment variables, the DDS domain), so the
+/// They share process-wide DDS runtime state, so the
 /// collection is not parallelized.
 ///
 /// Note on failure mode: if the teardown fix is reverted, these assertions fail but the
@@ -86,47 +86,42 @@ public sealed class RtiShutdownTests
     }
 
     /// <summary>
-    /// The reported failure: a handler that never returns must not pin shutdown forever.
-    /// Dispose is expected to give up after DDS_SHUTDOWN_TIMEOUT_MS and return.
+    /// A blocked handler must not pin shutdown beyond the explicit connection timeout.
+    /// Release the handler after the bounded-return assertion so the suite leaves no worker behind.
     /// </summary>
     [RtiFact]
     public void WedgedHandlerDoesNotBlockDisposeForever()
     {
-        const int shutdownTimeoutMs = 2000;
-        var original = Environment.GetEnvironmentVariable("DDS_SHUTDOWN_TIMEOUT_MS");
-        Environment.SetEnvironmentVariable("DDS_SHUTDOWN_TIMEOUT_MS", shutdownTimeoutMs.ToString());
-
+        using var handlerEntered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var client = DdsClient.Connect(RtiRuntime.CreateOptions(TimeSpan.FromMilliseconds(200)));
+        var subscription = client.Subscribe<TimeTickInformation>(_ =>
+        {
+            handlerEntered.Set();
+            release.Wait();
+        });
+        Task? dispose = null;
         try
         {
-            var client = DdsClient.Connect(RtiRuntime.CreateOptions());
-            var handlerEntered = new ManualResetEventSlim();
-
-            using var subscription = client.Subscribe<TimeTickInformation>(_ =>
-            {
-                handlerEntered.Set();
-                Thread.Sleep(Timeout.Infinite);
-            });
-
             var publisher = client.CreatePublisher<TimeTickInformation>();
-            Thread.Sleep(500);
+            publisher.WaitForSubscribers(1, TimeSpan.FromSeconds(10));
             publisher.Publish(new TimeTickInformation());
+            Assert.True(handlerEntered.Wait(HardLimit), "The blocked handler never received a sample.");
 
-            Assert.True(handlerEntered.Wait(HardLimit), "The wedged handler never received a sample.");
-
-            // Run Dispose off the test thread: if this regresses it blocks forever, and a
-            // failed assertion is far more useful than a hung test run.
-            var dispose = Task.Run(client.Dispose);
-
-            Assert.True(
-                dispose.Wait(HardLimit),
-                $"Dispose did not return within {HardLimit} while a handler was wedged. " +
-                "Teardown is blocking again, which is what leaves the process alive holding its ports.");
-
+            // Keep a regression from hanging the test thread indefinitely.
+            dispose = Task.Run(client.Dispose);
+            Assert.True(dispose.Wait(TimeSpan.FromSeconds(2)), "Dispose exceeded its bounded shutdown wait.");
             Assert.Null(dispose.Exception);
+            Assert.Equal(DdsShutdownState.Closing, client.ShutdownState);
+            Assert.False(client.WaitForShutdown(TimeSpan.Zero));
         }
         finally
         {
-            Environment.SetEnvironmentVariable("DDS_SHUTDOWN_TIMEOUT_MS", original);
+            release.Set();
+            subscription.Dispose();
+            client.Dispose();
+            if (dispose is not null) Assert.True(dispose.Wait(HardLimit));
+            Assert.True(client.WaitForShutdown(HardLimit));
         }
     }
 
@@ -322,11 +317,9 @@ public sealed class RtiShutdownTests
     [RtiFact]
     public void TimedOutSubscriptionStaysTrackedUntilHandlerFinishes()
     {
-        var previous = Environment.GetEnvironmentVariable("DDS_SHUTDOWN_TIMEOUT_MS");
-        Environment.SetEnvironmentVariable("DDS_SHUTDOWN_TIMEOUT_MS", "100");
         using var entered = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
-        var options = RtiRuntime.CreateOptions();
+        var options = RtiRuntime.CreateOptions(TimeSpan.FromMilliseconds(100));
         using var transport = new RtiDdsTransport(options);
         using var client = new DdsClient(options, transport);
         var subscription = client.Subscribe<TimeTickInformation>(_ => { entered.Set(); release.Wait(); });
@@ -346,49 +339,42 @@ public sealed class RtiShutdownTests
         {
             release.Set();
             subscription.Dispose();
-            Environment.SetEnvironmentVariable("DDS_SHUTDOWN_TIMEOUT_MS", previous);
         }
     }
 
     [RtiFact]
     public void TimedOutClientReclaimsParticipantAfterHandlerRecovers()
     {
-        var previous = Environment.GetEnvironmentVariable("DDS_SHUTDOWN_TIMEOUT_MS");
-        Environment.SetEnvironmentVariable("DDS_SHUTDOWN_TIMEOUT_MS", "50");
         var baseline = Rti.Dds.Domain.DomainParticipantFactory.Instance.Participants.Count();
-        try
+        for (var iteration = 0; iteration < 3; ++iteration)
         {
-            for (var iteration = 0; iteration < 3; ++iteration)
+            using var entered = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            var options = new DdsClientOptions {
+                MessageModules = [DDSSimMessages.Module], DomainId = 103,
+                Topics = [Topic.Both<TimeTickInformation>()],
+                ShutdownTimeout = TimeSpan.FromMilliseconds(100)
+            };
+            var transport = new RtiDdsTransport(options);
+            var client = new DdsClient(options, transport);
+            var subscription = client.Subscribe<TimeTickInformation>(_ => { entered.Set(); release.Wait(); });
+            try
             {
-                using var entered = new ManualResetEventSlim();
-                using var release = new ManualResetEventSlim();
-                var options = new DdsClientOptions {
-                    MessageModules = [DDSSimMessages.Module], DomainId = 103,
-                    Topics = [Topic.Both<TimeTickInformation>()],
-                    ShutdownTimeout = TimeSpan.FromMilliseconds(100)
-                };
-                var transport = new RtiDdsTransport(options);
-                var client = new DdsClient(options, transport);
-                var subscription = client.Subscribe<TimeTickInformation>(_ => { entered.Set(); release.Wait(); });
-                try
-                {
-                    var publisher = client.CreatePublisher<TimeTickInformation>();
-                    publisher.WaitForSubscribers(1, TimeSpan.FromSeconds(10));
-                    publisher.Publish(new TimeTickInformation());
-                    Assert.True(entered.Wait(5000));
-                    Assert.True(Time(client.Dispose) < TimeSpan.FromSeconds(2));
-                    Assert.Equal(DdsShutdownState.Closing, client.ShutdownState);
-                    Assert.False(client.WaitForShutdown(TimeSpan.Zero));
-                    Assert.False(transport.WaitForDisposeCompletion(TimeSpan.FromMilliseconds(200)));
-                }
-                finally { release.Set(); subscription.Dispose(); client.Dispose(); }
-                Assert.True(transport.WaitForDisposeCompletion(TimeSpan.FromSeconds(10)));
-                Assert.True(client.WaitForShutdown(TimeSpan.Zero));
-                Assert.Equal(DdsShutdownState.Closed, client.ShutdownState);
-                Assert.Equal(baseline, Rti.Dds.Domain.DomainParticipantFactory.Instance.Participants.Count());
+                var publisher = client.CreatePublisher<TimeTickInformation>();
+                publisher.WaitForSubscribers(1, TimeSpan.FromSeconds(10));
+                publisher.Publish(new TimeTickInformation());
+                Assert.True(entered.Wait(5000));
+                Assert.True(Time(client.Dispose) < TimeSpan.FromSeconds(2));
+                Assert.Equal(DdsShutdownState.Closing, client.ShutdownState);
+                Assert.False(client.WaitForShutdown(TimeSpan.Zero));
+                Assert.False(transport.WaitForDisposeCompletion(TimeSpan.FromMilliseconds(200)));
             }
+            finally { release.Set(); subscription.Dispose(); client.Dispose(); }
+            Assert.True(transport.WaitForDisposeCompletion(TimeSpan.FromSeconds(10)));
+            Assert.True(client.WaitForShutdown(TimeSpan.Zero));
+            Assert.Equal(DdsShutdownState.Closed, client.ShutdownState);
+            Assert.Equal(baseline, Rti.Dds.Domain.DomainParticipantFactory.Instance.Participants.Count());
         }
-        finally { Environment.SetEnvironmentVariable("DDS_SHUTDOWN_TIMEOUT_MS", previous); }
     }
 
     private static int CurrentHandleCount()

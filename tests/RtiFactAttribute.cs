@@ -33,10 +33,10 @@ internal static class RtiRuntime
     /// </summary>
     public const int DomainId = 71;
 
-    public static DdsClientOptions CreateOptions() => new()
+    public static DdsClientOptions CreateOptions(TimeSpan? shutdownTimeout = null) => new()
     {
         MessageModules = [DDSSimMessages.Module],
-        ShutdownTimeout = DdsClientOptionResolver.ResolveShutdownTimeout(),
+        ShutdownTimeout = shutdownTimeout ?? new DdsClientOptions().ShutdownTimeout,
         DomainId = DomainId,
         ParticipantName = "DdsClientShutdownTests",
         LogLevel = DdsLogLevel.None

@@ -104,7 +104,7 @@ public sealed class RtiDeliveryTests
         using var s2 = second.Subscribe<TimeTickInformation>(_ => { });
         var publisher = sender.CreatePublisher<TimeTickInformation>();
         publisher.WaitForSubscribers(2, TimeSpan.FromSeconds(10));
-        Assert.Throws<TimeoutException>(() => publisher.WaitForSubscribers(3, TimeSpan.FromMilliseconds(100)));
+        Assert.Throws<DdsTimeoutException>(() => publisher.WaitForSubscribers(3, TimeSpan.FromMilliseconds(100)));
     }
 
     [RtiFact]
@@ -112,7 +112,7 @@ public sealed class RtiDeliveryTests
     {
         using var client = DdsClient.Connect(RtiRuntime.CreateOptions());
         var publisher = client.CreatePublisher<TimeTickInformation>();
-        Assert.Throws<TimeoutException>(() => publisher.WaitForSubscribers(1, TimeSpan.FromMilliseconds(100)));
+        Assert.Throws<DdsTimeoutException>(() => publisher.WaitForSubscribers(1, TimeSpan.FromMilliseconds(100)));
         Assert.Throws<ArgumentOutOfRangeException>(() => publisher.WaitForSubscribers(0, TimeSpan.Zero));
         Assert.Throws<ArgumentOutOfRangeException>(() => publisher.WaitForAcknowledgments(TimeSpan.FromMilliseconds(-1)));
         client.Dispose();

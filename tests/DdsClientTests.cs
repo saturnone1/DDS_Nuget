@@ -74,8 +74,10 @@ public sealed class DdsClientTests
     [Fact]
     public void TypedRegistrationsUseCompiledMessageTypes()
     {
-        Assert.Equal(new TopicDefinition("TimeTickInformation", null, TopicDirection.Publish) { SampleType = typeof(TimeTickInformation) },
+        Assert.Equal(new TopicDefinition(string.Empty, null, TopicDirection.Publish) { SampleType = typeof(TimeTickInformation) },
             Topic.Publish<TimeTickInformation>());
+        using var client = CreateTestClient(CreateOptions([Topic.Publish<TimeTickInformation>()]));
+        Assert.Equal("TimeTickInformation", Assert.Single(client.Configuration.Topics).Name);
         Assert.Equal("AmbassadorProfiles::ReliableRealtime", Topic.Publish<TimeTickInformation>().QualifiedQosProfile);
         Assert.Equal("ReliableRealtime", Topic.Publish<TimeTickInformation>("ReliableRealtime").QosProfile);
         Assert.Equal(TopicDirection.Subscribe, Topic.Subscribe<WeaponFire>().Direction);
